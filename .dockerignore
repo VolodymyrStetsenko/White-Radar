@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+*.pyc
+data
+logs
+tests
+docs
+config.toml
+watchlist.toml
+*.sqlite3*
