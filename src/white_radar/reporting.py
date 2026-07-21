@@ -4,7 +4,7 @@ import collections
 import html
 from typing import Any
 
-from white_radar.models import ChainConfig, RadarEvent
+from white_radar.models import ChainConfig, IncidentRecord, RadarEvent
 
 
 def _plain(value: object, *, limit: int = 500) -> str:
@@ -17,6 +17,7 @@ def render_incident_report(
     chain: ChainConfig,
     *,
     graph: dict[str, list[dict[str, Any]]] | None = None,
+    incident: IncidentRecord | None = None,
 ) -> str:
     """Render a reproducible, non-accusatory Markdown triage report."""
 
@@ -45,6 +46,18 @@ def render_incident_report(
         lines.append(f"- Deployer or sender: `{_plain(event.deployer_address)}`")
     if event.tx_hash:
         lines.append(f"- Transaction: `{_plain(event.tx_hash)}`")
+    if incident:
+        lines.extend(
+            [
+                "",
+                "## Incident workflow",
+                "",
+                f"- Incident ID: `{_plain(incident.incident_id)}`",
+                f"- Status: **{incident.status.value.upper()}**",
+                f"- Acknowledgement deadline: `{_plain(incident.due_at)}`",
+                f"- Owner: `{_plain(incident.owner or 'unassigned')}`",
+            ]
+        )
 
     lines.extend(["", "## Why this case surfaced", ""])
     lines.extend(f"- {_plain(reason)}" for reason in event.reasons)
@@ -155,7 +168,14 @@ def render_incident_report(
     return "\n".join(lines) + "\n"
 
 
-def render_digest(events: list[RadarEvent], chains: dict[str, ChainConfig], *, hours: int) -> str:
+def render_digest(
+    events: list[RadarEvent],
+    chains: dict[str, ChainConfig],
+    *,
+    hours: int,
+    incidents: list[IncidentRecord] | None = None,
+    overdue_incident_ids: set[str] | None = None,
+) -> str:
     """Render a compact Telegram HTML digest without claiming exploitability."""
 
     severity = collections.Counter(event.severity.value for event in events)
@@ -173,6 +193,17 @@ def render_digest(events: list[RadarEvent], chains: dict[str, ChainConfig], *, h
             f"Info {severity['informational']}"
         ),
     ]
+    if incidents is not None:
+        open_statuses = {"new", "acknowledged", "investigating", "monitoring"}
+        open_cases = [item for item in incidents if item.status.value in open_statuses]
+        overdue = overdue_incident_ids or set()
+        lines.extend(
+            [
+                "",
+                "<b>Incident workflow</b>",
+                f"Open {len(open_cases)} · Overdue {len(overdue)}",
+            ]
+        )
     if chain_counts:
         lines.extend(["", "<b>Networks</b>"])
         for name, count in chain_counts.most_common():

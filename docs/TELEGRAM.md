@@ -15,6 +15,7 @@ The original low-context format is replaced by an evidence-first case card.
 - explainable score reasons;
 - a safe recommended action;
 - stable case ID;
+- pending sender, protocol role, selector, native value, policy state, and finding codes;
 - transaction, contract, and authorized-scope buttons.
 
 ## Noise controls
@@ -27,8 +28,9 @@ protocol-configured triage signal, not proof of an attack.
 
 ## Digests
 
-`white-radar digest --hours 24` renders a compact summary of case counts by severity, network, and
-signal type plus the highest-priority cases. Printing is the default. `--send` is an explicit action
+`white-radar digest --hours 24` renders a compact summary of case counts by severity, network,
+signal type, open/overdue incident totals, and the highest-priority cases. Printing is the default.
+`--send` is an explicit action
 and still respects Telegram configuration and dry-run mode.
 
 ## Safe rollout

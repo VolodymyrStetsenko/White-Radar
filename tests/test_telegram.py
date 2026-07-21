@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +26,25 @@ class TelegramFormattingTests(unittest.TestCase):
         buttons = event_buttons(sample_event(), ETHEREUM)
         labels = {button["text"] for row in buttons for button in row}
         self.assertEqual(labels, {"Transaction", "Contract"})
+
+    def test_renders_pending_policy_context_without_claiming_intent(self) -> None:
+        event = dataclasses.replace(
+            sample_event(),
+            event_type="pending_watch",
+            metadata={
+                "protocol": "Example",
+                "role": "proxy",
+                "selector": "0x12345678",
+                "native_value_wei": 1,
+                "policy_configured": True,
+                "policy_baseline_match": False,
+                "policy_findings": [{"code": "selector_outside_baseline"}],
+            },
+        )
+        text = render_event(event, ETHEREUM)
+        self.assertIn("Sender:", text)
+        self.assertIn("Policy baseline:</b> REVIEW", text)
+        self.assertIn("selector_outside_baseline", text)
 
     def test_notifier_delivers_and_respects_dry_run(self) -> None:
         config = TelegramConfig(enabled=True, minimum_score=60, send_testnet_alerts=False)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from tests.common import sample_event
 from white_radar.fingerprint import fingerprint_bytecode
-from white_radar.models import ContractMetadata, utc_now
+from white_radar.models import ContractMetadata, IncidentStatus, utc_now
 from white_radar.storage import RadarStore
 
 
@@ -126,6 +126,66 @@ class StorageTests(unittest.TestCase):
                 limit=10,
             )
             self.assertEqual([item["address"] for item in due], ["0x" + "11" * 20])
+
+    def test_incident_lifecycle_sla_and_service_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RadarStore(Path(directory) / "radar.sqlite3")
+            store.initialize()
+            event = sample_event()
+            store.add_event(event)
+            incident = store.open_incident(
+                event,
+                minimum_score=70,
+                sla_minutes=15,
+                protocol="Example",
+            )
+            self.assertIsNotNone(incident)
+            assert incident is not None
+            self.assertEqual(incident.status, IncidentStatus.NEW)
+            self.assertEqual(store.open_incident(event, minimum_score=70, sla_minutes=15), incident)
+            self.assertEqual(len(store.incident_history(incident.incident_id)), 1)
+            self.assertEqual(len(store.overdue_incidents()), 1)
+
+            acknowledged = store.transition_incident(
+                incident.incident_id,
+                IncidentStatus.ACKNOWLEDGED,
+                actor="operator",
+                note="Evidence review started.",
+            )
+            self.assertEqual(acknowledged.owner, "operator")
+            resolved = store.transition_incident(
+                incident.incident_id,
+                IncidentStatus.RESOLVED,
+                actor="operator",
+                note="Expected release confirmed.",
+            )
+            self.assertIsNotNone(resolved.closed_at)
+            self.assertEqual(store.incident_counts()["open"], 0)
+            self.assertEqual(len(store.incident_history(incident.incident_id)), 3)
+            with self.assertRaises(ValueError):
+                store.transition_incident(
+                    incident.incident_id,
+                    IncidentStatus.INVESTIGATING,
+                    actor="operator",
+                )
+
+            store.record_heartbeat(
+                service_name="confirmed_scanner",
+                chain_id=1,
+                details={"chain": "ethereum"},
+            )
+            healthy = store.health_snapshot(stale_after_seconds=120)
+            self.assertTrue(healthy["ok"])
+            self.assertEqual(healthy["services"][0]["details"]["chain"], "ethereum")
+            store.record_heartbeat(
+                service_name="confirmed_scanner",
+                chain_id=1,
+                status="degraded",
+                last_error="TimeoutError",
+            )
+            degraded = store.health_snapshot(stale_after_seconds=120)
+            self.assertFalse(degraded["ok"])
+            self.assertEqual(degraded["services"][0]["last_error"], "TimeoutError")
 
 
 if __name__ == "__main__":

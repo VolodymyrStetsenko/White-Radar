@@ -21,7 +21,10 @@ White Radar is designed around five invariants:
 | Trace parser | Watchlist-scoped successful internal creations | Provider debug API |
 | `watch_pending_transactions` | Watchlist-only pending metadata | Partial provider mempool |
 | Scoring | Deterministic priority and reasons | Configuration quality |
-| `RadarStore` | Cursors, profiles, graph evidence, cases, alert outbox | Local filesystem |
+| Policy engine | Approved sender, selector, value, and SLA baselines | Operator policy file |
+| Incident workflow | State transitions, deadlines, ownership, audit history | Operator process |
+| Health monitor | Scanner, refresh, and pending-service heartbeats | Local clock and database |
+| `RadarStore` | Cursors, profiles, graph evidence, incidents, heartbeats, alert outbox | Local filesystem |
 | `TelegramNotifier` | Human-readable triage delivery | Telegram API |
 
 ## Confirmed-block pipeline
@@ -75,7 +78,28 @@ The pending observer:
 - accepts full filtered transaction objects or fetches metadata through the read-only HTTP client;
 - discards transactions whose destination is outside the watchlist;
 - stores the selector and calldata length, never full calldata;
+- evaluates a matching local policy and records each explainable baseline difference;
+- opens an incident when the configured priority threshold is reached;
 - never constructs, signs, replaces, or submits a transaction.
+
+## Policy and incident model
+
+Policies are bounded TOML documents loaded from an ignored operational path. The parser validates
+addresses, selectors, non-negative value limits, positive SLAs, duplicates, schema version, and a
+one-megabyte input limit. Each loaded file has a deterministic SHA-256 identifier.
+
+Incidents are idempotently linked one-to-one with the event that opened them. Their state machine
+permits explicit transitions from `new` through `acknowledged`, `investigating`, and `monitoring`
+to either `resolved` or `false_positive`. Terminal cases cannot be silently reopened. Every
+transition records the prior state, new state, actor, note, and timestamp.
+
+## Service health model
+
+The confirmed scanner writes a heartbeat after every successful chain cycle and a degraded
+heartbeat after an exception. The pending observer writes a heartbeat every 30 seconds while its
+WebSocket subscription is active. Scheduled profile refresh writes a heartbeat after each batch.
+`white-radar health` reports missing, degraded, or stale service records and exits non-zero when the
+snapshot is unhealthy.
 
 ## Scheduled profile refresh
 
@@ -91,6 +115,7 @@ updates the refresh timestamp and produces no case.
 - Duplicate events are eliminated by stable IDs and database constraints.
 - Telegram failures leave events unalerted in SQLite for later retry.
 - Credentials are referenced by environment-variable name and never serialized into events.
+- Heartbeat errors store exception class names rather than endpoint-bearing exception text.
 
 ## Scaling path
 

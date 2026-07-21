@@ -647,6 +647,12 @@ class ChainScanner:
     def _record_and_alert(self, event: RadarEvent, stats: ScanStats) -> None:
         if not self.store.add_event(event):
             return
+        self.store.open_incident(
+            event,
+            minimum_score=self.settings.app.incident_minimum_score,
+            sla_minutes=self.settings.app.incident_sla_minutes,
+            protocol=str(event.metadata.get("protocol") or "") or None,
+        )
         stats.events += 1
         LOGGER.info("radar event", extra=log_context(**event.to_dict()))
 

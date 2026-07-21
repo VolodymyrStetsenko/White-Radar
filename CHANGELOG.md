@@ -2,6 +2,16 @@
 
 All notable changes are documented here.
 
+## 0.3.0 — 2026-07-21
+
+- added bounded per-protocol policy packs for sender, selector, native-value, and SLA baselines;
+- added explainable pending-policy findings with reproducible policy SHA-256 evidence;
+- added automatic high-priority incident creation and an audited incident state machine;
+- added acknowledgement deadlines, incident ownership, overdue queries, reports, and digest totals;
+- added service heartbeats and a machine-readable health command for 24/7 operations;
+- added a hardened systemd health timer and richer pending Telegram context;
+- expanded tests, operations guidance, architecture, and threat modeling.
+
 ## 0.2.0 — 2026-07-21
 
 - added Solidity-metadata-normalized runtime fingerprints and bytecode similarity clusters;

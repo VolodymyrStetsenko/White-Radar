@@ -19,8 +19,13 @@ broadcast, replace, replay, front-run, or copy transactions, and it never accept
   implementations, admins, beacons, and bytecode relationships;
 - monitors standard proxy upgrade/admin/beacon events globally or for an allowlisted scope;
 - observes pending transactions only when they target explicitly authorized watchlist addresses;
+- compares pending metadata with deterministic protocol policy baselines for approved senders,
+  selectors, native-value limits, and response SLAs;
 - periodically re-enriches stored profiles and surfaces runtime, verification, or proxy-state drift;
 - assigns an explainable priority score with evidence and a recommended next action;
+- promotes high-priority events into auditable incidents with acknowledgement deadlines and
+  controlled state transitions;
+- records per-service heartbeats and exposes a machine-readable 24/7 health check;
 - persists cursors, deployments, profiles, graph evidence, cases, and a retryable alert outbox;
 - sends structured Telegram cases with explorer links and related-contract context;
 - produces Markdown incident reports, Telegram digests, JSON logs, and normalized JSONL evidence.
@@ -183,6 +188,28 @@ The identity graph records the evidence behind each edge. It does not identify t
 person controlling an address and must not be used as proof of attribution. See
 [Security intelligence](docs/INTELLIGENCE.md).
 
+## Protocol policies and incident workflow
+
+`policies.toml` is an ignored local file for protocol-approved operational baselines. It can define
+authorized senders, allowed and critical selectors, a maximum native-value baseline, and a
+protocol-specific acknowledgement SLA for each watched contract. White Radar stores the SHA-256
+of the loaded file with policy-backed events so an operator can identify which baseline produced a
+finding. It never treats a baseline deviation as proof of malicious intent.
+
+```bash
+cp policies.example.toml policies.toml
+white-radar doctor
+white-radar incidents --status new
+white-radar incident-transition \
+  --incident-id CASE_ID \
+  --status acknowledged \
+  --actor operator \
+  --note "Independent evidence review started."
+white-radar health
+```
+
+See [Policy and incident operations](docs/POLICY_AND_INCIDENTS.md).
+
 ## Telegram
 
 Keep `WHITE_RADAR_DRY_RUN=true` until alert previews are correct. Then configure:
@@ -216,12 +243,14 @@ case ID, and direct explorer buttons. See [Telegram alerts](docs/TELEGRAM.md).
 
 ```bash
 white-radar status
+white-radar health
+white-radar incidents --limit 50
 white-radar events --limit 20
 white-radar export evidence/events.jsonl
 ```
 
 Docker Compose and hardened systemd units are included for confirmed scanning, authorized pending
-observation, scheduled profile refresh, and optional hourly digests. Read
+observation, scheduled profile refresh, heartbeat verification, and optional hourly digests. Read
 [Operations](docs/OPERATIONS.md) before enabling a 24/7 service.
 
 The source can be public because secrets, runtime data, and operational watchlists are excluded. If
@@ -254,6 +283,8 @@ CI additionally runs Ruff, mypy, pytest, coverage, and secret-pattern checks on 
 - SQLite is appropriate for a single-node deployment. Horizontal workers require PostgreSQL and a
   queue.
 - No automated asset movement, exploit replication, or transaction competition is implemented.
+- Policy findings describe baseline differences; they require independent evidence and human
+  validation.
 
 See [Roadmap](ROADMAP.md) for the next engineering milestones.
 

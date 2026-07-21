@@ -10,6 +10,8 @@ white-radar init
 white-radar doctor --online
 white-radar run-once --chain ethereum
 white-radar refresh-profiles --chain ethereum --limit 25 --min-age-minutes 10
+white-radar health
+white-radar incidents --status new
 ```
 
 Keep `WHITE_RADAR_DRY_RUN=true` until event scoring and alert previews have been reviewed.
@@ -27,6 +29,8 @@ Keep `WHITE_RADAR_DRY_RUN=true` until event scoring and alert previews have been
 - [ ] preview Telegram cases before enabling delivery;
 - [ ] back up the SQLite database and periodically export JSONL evidence;
 - [ ] configure host monitoring for process restarts, disk space, and clock drift.
+- [ ] configure the heartbeat timer and alert on a non-zero `white-radar health` result;
+- [ ] review protocol policies and acknowledgement SLAs with the scope owner.
 
 ## Docker Compose
 
@@ -34,6 +38,7 @@ Keep `WHITE_RADAR_DRY_RUN=true` until event scoring and alert previews have been
 cp .env.example .env
 cp config.example.toml config.toml
 cp watchlist.example.toml watchlist.toml
+cp policies.example.toml policies.toml
 mkdir -p data
 
 docker compose build
@@ -54,6 +59,7 @@ The example unit assumes:
 - secrets: `/etc/white-radar/white-radar.env`;
 - configuration: `/etc/white-radar/config.toml`;
 - watchlist: `/etc/white-radar/watchlist.toml`;
+- policy pack: `/etc/white-radar/policies.toml`;
 - data: `/var/lib/white-radar`;
 - service account: `white-radar`.
 
@@ -76,6 +82,9 @@ sudo systemctl enable --now white-radar-refresh@ethereum.timer
 
 # Optional hourly Telegram digest; enable only after a successful manual --send test.
 sudo systemctl enable --now white-radar-digest.timer
+
+# Local heartbeat verification every minute.
+sudo systemctl enable --now white-radar-health.timer
 ```
 
 Inspect `systemctl list-timers 'white-radar*'` and provider usage after rollout. Do not enable trace
@@ -149,3 +158,22 @@ white-radar digest --hours 24
 `digest` prints by default. It sends only with `--send`, Telegram enabled, dry-run disabled, and
 valid credentials. `refresh-profiles` never broadcasts a transaction; it reads current public state
 and produces a case only when stored intelligence changes.
+
+## Incident operations
+
+```bash
+white-radar incidents --status new
+white-radar incident-transition \
+  --incident-id CASE_ID \
+  --status acknowledged \
+  --actor operator \
+  --note "Evidence review started."
+white-radar incident-transition \
+  --incident-id CASE_ID \
+  --status investigating \
+  --actor operator
+```
+
+Use `resolved` only when evidence supports a closed disposition. Use `false_positive` when the
+signal is confirmed to be benign. Terminal incidents are immutable through the CLI so corrections
+remain visible in the audit history rather than silently rewriting the case.

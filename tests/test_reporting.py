@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from tests.common import ETHEREUM, sample_event
+from white_radar.models import IncidentRecord, IncidentStatus
 from white_radar.reporting import render_digest, render_incident_report
 
 
@@ -34,6 +35,31 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("case-123", digest)
         empty = render_digest([], {"ethereum": ETHEREUM}, hours=0)
         self.assertIn("No cases", empty)
+
+    def test_report_and_digest_include_incident_workflow(self) -> None:
+        event = sample_event()
+        incident = IncidentRecord(
+            incident_id="incident-1",
+            event_id=event.event_id,
+            status=IncidentStatus.NEW,
+            severity=event.severity,
+            protocol="Example",
+            owner=None,
+            created_at=event.observed_at,
+            updated_at=event.observed_at,
+            due_at="2026-07-20T12:15:00+00:00",
+        )
+        report = render_incident_report(event, ETHEREUM, incident=incident)
+        self.assertIn("## Incident workflow", report)
+        self.assertIn("incident-1", report)
+        digest = render_digest(
+            [event],
+            {"ethereum": ETHEREUM},
+            hours=24,
+            incidents=[incident],
+            overdue_incident_ids={incident.incident_id},
+        )
+        self.assertIn("Open 1 · Overdue 1", digest)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule White Radar heartbeat checks
+
+[Timer]
+OnBootSec=3m
+OnUnitActiveSec=1m
+AccuracySec=10s
+Unit=white-radar-health.service
+
+[Install]
+WantedBy=timers.target

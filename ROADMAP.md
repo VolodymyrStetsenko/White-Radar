@@ -27,11 +27,14 @@
 
 ## 0.3 — Authorized protocol defense
 
-- protocol-supplied invariants and event baselines;
-- fork-only transaction simulation with reproducible state snapshots;
-- anomaly rules reviewed and signed by the protocol owner;
-- incident case workflow with acknowledgement and escalation SLAs;
-- integration adapters for official disclosure and on-call systems.
+- [x] deterministic protocol-supplied sender, selector, value, and response-SLA baselines;
+- [x] explainable policy findings with a reproducible policy-file digest;
+- [x] incident workflow with acknowledgement deadlines and audited transitions;
+- [x] scanner, pending-observer, and profile-refresh heartbeats with a machine health check;
+- [ ] fork-only transaction simulation with reproducible state snapshots;
+- [ ] anomaly policy signatures reviewed and approved by the protocol owner;
+- [ ] integration adapters for official disclosure and on-call systems;
+- [ ] external metrics export and multi-host service-level objectives.
 
 ## Separate future responder
 

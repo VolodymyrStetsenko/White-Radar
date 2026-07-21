@@ -14,10 +14,14 @@ from white_radar.cli import (
     _load_runtime,
     build_parser,
     cmd_doctor,
+    cmd_health,
+    cmd_incident_transition,
+    cmd_incidents,
     cmd_init,
     cmd_preview,
     main,
 )
+from white_radar.config import Watchlist
 from white_radar.storage import RadarStore
 
 
@@ -32,7 +36,7 @@ class CliTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(cmd_init(str(config)), 0)
             created = json.loads(output.getvalue())["created"]
-            self.assertEqual(len(created), 3)
+            self.assertEqual(len(created), 4)
             config.write_text(config.read_text(encoding="utf-8") + "\n# preserved\n")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cmd_init(str(config)), 0)
@@ -75,6 +79,34 @@ class CliTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()),
             ):
                 self.assertEqual(cmd_preview(settings, store, None), 1)
+
+    def test_incident_and_health_operator_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = settings_for(Path(directory))
+            store = RadarStore(settings.app.database_path)
+            store.initialize()
+            event = sample_event()
+            store.add_event(event)
+            incident = store.open_incident(event, minimum_score=70, sla_minutes=15)
+            assert incident is not None
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cmd_incidents(store, status="new", limit=10), 0)
+                self.assertEqual(
+                    cmd_incident_transition(
+                        store,
+                        incident_id=incident.incident_id,
+                        status="acknowledged",
+                        actor="operator",
+                        note="Review started.",
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    cmd_health(settings, Watchlist((), ()), store, stale_after=None), 1
+                )
+            store.record_heartbeat(service_name="confirmed_scanner", chain_id=1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cmd_health(settings, Watchlist((), ()), store, stale_after=120), 0)
 
 
 if __name__ == "__main__":
