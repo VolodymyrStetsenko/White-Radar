@@ -1,16 +1,12 @@
 # Policy and incident operations
 
-White Radar 0.3 adds deterministic protocol baselines, auditable incident states, response
-deadlines, and process heartbeats. These features improve prioritization and operating discipline;
-they do not convert a transaction into proof of malicious intent or authorize active intervention.
+## Policy schema
 
-## Policy pack
-
-Copy `policies.example.toml` to the ignored operational file `policies.toml`. Each `[[protocols]]`
-record is keyed by chain ID and watched contract address.
+Copy `policies.example.toml` to the local `policies.toml`. Each `[[protocols]]` record is
+keyed by chain ID and contract address.
 
 ```toml
-schema_version = 1
+schema_version = 2
 
 [[protocols]]
 chain_id = 1
@@ -21,28 +17,80 @@ allowed_selectors = ["0x12345678"]
 critical_selectors = ["0x12345678"]
 max_native_value_wei = 0
 incident_sla_minutes = 15
+selector_labels = { "0x12345678" = "sensitiveOperation(uint256)" }
+
+[[protocols.invariants]]
+name = "paused state"
+target = "0x1111111111111111111111111111111111111111"
+call_data = "0x5c975abb"
+decode_as = "bool"
+operator = "eq"
+expected = false
+score = 90
+alert_on_error = true
 ```
 
-| Field | Effect | Interpretation limit |
-|---|---|---|
-| `authorized_senders` | Flags an observed sender outside the supplied set | Accounts can rotate or use relayers |
-| `allowed_selectors` | Flags a selector outside the supplied set | Proxies and fallback paths may be dynamic |
-| `critical_selectors` | Raises priority for an owner-designated sensitive call | Sensitivity is not exploitability |
-| `max_native_value_wei` | Flags value above the supplied ceiling | Token transfers are not represented by this field |
-| `incident_sla_minutes` | Sets the acknowledgement deadline | An SLA is an operational target, not a legal conclusion |
+## Baseline fields
 
-White Radar rejects malformed addresses and selectors, duplicate contract policies, negative value
-limits, non-positive SLAs, unknown schema versions, and files over one megabyte. It records the
-policy file SHA-256 on policy-backed pending events. It never executes code from the policy file.
+| Field | Evaluation |
+|---|---|
+| `authorized_senders` | Adds a finding when the pending sender is outside the configured set |
+| `allowed_selectors` | Adds a finding when a selector is outside the configured set |
+| `critical_selectors` | Marks protocol-designated high-priority functions |
+| `max_native_value_wei` | Adds a finding above the configured native-value ceiling |
+| `incident_sla_minutes` | Overrides the acknowledgement deadline |
+| `selector_labels` | Adds deterministic local labels when verified ABI metadata is unavailable |
+| `invariants` | Evaluates typed read calls at the confirmation-safe block |
 
-Run `white-radar doctor` after every change. The doctor output reports the number of policies and
-their digest without printing credentials.
+Policy findings are evidence fields. They retain the policy-file SHA-256 so the exact baseline
+revision can be identified later.
+
+## Invariant fields
+
+| Field | Values |
+|---|---|
+| `name` | Unique 1-100 character name within the protocol |
+| `target` | Optional call target; defaults to the protocol address |
+| `call_data` | 4-8,192 bytes of hexadecimal call data |
+| `decode_as` | `uint256`, `int256`, `address`, `bool`, or `bytes32` |
+| `operator` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `zero`, or `nonzero` |
+| `expected` | Typed comparison value; omitted for `zero` and `nonzero` |
+| `score` | Violation priority from 0-100 |
+| `alert_on_error` | Emits an error-state transition when the call/decoder fails |
+
+Invariant checks use `eth_call` at one explicit block. The database stores the current status,
+observed/expected values, block number/hash, and check timestamp.
+
+```bash
+white-radar check-invariants --chain ethereum
+```
+
+Repeated identical states update the checkpoint without generating duplicate cases.
+
+## Validation
+
+The parser validates:
+
+- supported schema version;
+- maximum one-megabyte policy file;
+- unique chain/address records;
+- address and selector formats;
+- non-negative value ceilings;
+- positive SLA values;
+- unique invariant names;
+- bounded call data;
+- supported decoders and operators.
+
+```bash
+white-radar doctor
+white-radar doctor --online
+```
+
+`doctor` reports policy count and digest without printing policy contents or credentials.
 
 ## Incident lifecycle
 
-Events at or above `incident_minimum_score` are promoted idempotently into incidents. The default
-threshold is 70 and the default acknowledgement deadline is 30 minutes. A matching policy can
-override the deadline for its contract.
+Events at or above `incident_minimum_score` are promoted idempotently into incidents.
 
 ```mermaid
 stateDiagram-v2
@@ -62,7 +110,7 @@ stateDiagram-v2
     monitoring --> false_positive
 ```
 
-List and update incidents through the local CLI:
+Commands:
 
 ```bash
 white-radar incidents --status new --limit 50
@@ -70,42 +118,36 @@ white-radar incident-transition \
   --incident-id CASE_ID \
   --status acknowledged \
   --actor operator \
-  --note "Independent evidence review started."
+  --note "Evidence review started."
 ```
 
-Every transition appends its actor, note, previous state, new state, and timestamp. `resolved` and
-`false_positive` are terminal. White Radar does not delete or silently reopen terminal history.
+Each transition appends actor, note, previous state, new state, and timestamp. `resolved` and
+`false_positive` are terminal.
 
-The workflow follows the preparation, detection, response, and recovery principles in
-[NIST SP 800-61 Rev. 3](https://csrc.nist.gov/pubs/sp/800/61/r3/final). Event and transition fields
-are intentionally structured for consistent analysis in line with the
-[OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html).
+## Case analysis sequence
+
+1. Confirm chain ID, transaction hash, block number, and block hash.
+2. Review policy finding codes and the policy digest.
+3. Review ABI source/signature and decoded static fields.
+4. Compare state-pinned simulation outcome and trace summary.
+5. Inspect proxy snapshot and current implementation fingerprint.
+6. Review invariant state and transition history.
+7. Traverse the bounded identity graph for related deployments and control addresses.
+8. Classify the incident and record the evidence-based disposition.
+9. Continue confirmed-chain monitoring for state changes or invariant recovery.
+
+The workflow supports preparation, detection, analysis, response coordination, recovery
+monitoring, and improvement consistent with
+[NIST SP 800-61 Rev. 3](https://csrc.nist.gov/pubs/sp/800/61/r3/final).
 
 ## Service heartbeats
 
-`confirmed_scanner`, `pending_observer`, and `profile_refresh` write timestamped service records.
-The pending observer refreshes its record every 30 seconds while its WebSocket subscription is
-active. Exceptions produce a `degraded` state with only the exception class name, preventing an RPC
-URL or credential from being copied into the health table.
+`confirmed_scanner`, `pending_observer`, and `profile_refresh` write timestamped health
+records. Exceptions produce a degraded record containing the exception class.
 
 ```bash
 white-radar health
 white-radar health --stale-after 180
 ```
 
-The command returns JSON and exits non-zero when there are no heartbeat records, a service is
-degraded, or a heartbeat is stale. The included `white-radar-health.timer` runs this check every
-minute. A host monitoring system should alert on the failed unit; the local timer cannot report a
-complete host outage by itself.
-
-## Safe validation order
-
-1. Run the complete offline suite and secret scan.
-2. Configure one test network with a newly issued provider endpoint in the ignored `.env` file.
-3. Run `doctor --online`, one bounded confirmed scan, and alert previews.
-4. Review policies against an owned or explicitly authorized contract.
-5. Validate the pending observer on the test network without broadcasting transactions.
-6. Enable one production network in read-only mode and begin with conservative ranges.
-7. Observe volume, provider quota, heartbeats, and incident quality before expanding scope.
-
-White Radar never requires a wallet seed phrase, private key, unlocked account, or signing service.
+The command returns JSON and exits non-zero for missing, degraded, or stale expected workloads.

@@ -3,8 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from white_radar.config import ConfigurationError, load_settings, load_watchlist
+from white_radar.config import (
+    ConfigurationError,
+    configured_endpoints,
+    load_settings,
+    load_watchlist,
+)
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -14,6 +20,26 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(settings.chain_by_name("ethereum").chain_id, 1)
         self.assertTrue(settings.chain_by_name("ethereum").enabled)
         self.assertTrue(settings.app.dry_run)
+        self.assertTrue(settings.analysis.invariant_checks_enabled)
+        self.assertEqual(
+            settings.chain_by_name("ethereum").rpc_http_fallback_envs,
+            ("RPC_ETHEREUM_HTTP_SECONDARY",),
+        )
+
+    def test_resolves_unique_rpc_fallbacks_from_environment(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "PRIMARY": "https://primary.invalid",
+                "SECONDARY": "https://secondary.invalid",
+                "DUPLICATE": "https://primary.invalid",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                configured_endpoints("PRIMARY", ("SECONDARY", "DUPLICATE")),
+                ("https://primary.invalid", "https://secondary.invalid"),
+            )
 
     def test_watchlist_normalizes_addresses_and_selectors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

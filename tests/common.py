@@ -60,7 +60,7 @@ def sample_event() -> RadarEvent:
         severity=Severity.HIGH,
         confidence=0.9,
         reasons=("Verified source metadata.", "Related deployment cluster detected."),
-        recommended_action="Review the authorized release scope.",
+        recommended_action="Review the release evidence and protocol inventory.",
         subject_address="0x1111111111111111111111111111111111111111",
         deployer_address="0x2222222222222222222222222222222222222222",
         tx_hash="0x" + "33" * 32,

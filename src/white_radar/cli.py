@@ -12,10 +12,13 @@ import time
 from pathlib import Path
 
 from white_radar import __version__
+from white_radar.abi import AbiResolver
 from white_radar.config import (
+    ADDRESS_RE,
     ConfigurationError,
     Settings,
     Watchlist,
+    configured_endpoints,
     load_dotenv,
     load_settings,
     load_watchlist,
@@ -25,8 +28,10 @@ from white_radar.mempool import watch_pending_transactions
 from white_radar.models import ChainConfig, IncidentStatus, RadarEvent
 from white_radar.monitor import ChainScanner
 from white_radar.policy import load_policy_book
+from white_radar.proxy import inspect_proxy
 from white_radar.reporting import render_digest, render_incident_report
 from white_radar.rpc import JsonRpcClient
+from white_radar.simulation import simulate_transaction
 from white_radar.storage import RadarStore
 from white_radar.telegram import TelegramNotifier, render_event
 
@@ -36,7 +41,7 @@ LOGGER = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="white-radar",
-        description="Read-only multi-chain security monitoring and incident triage.",
+        description="Multi-chain protocol defense monitoring and incident intelligence.",
     )
     parser.add_argument("--version", action="version", version=f"White Radar {__version__}")
     parser.add_argument(
@@ -46,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init", help="Create local config and watchlist from safe examples.")
+    subparsers.add_parser("init", help="Create local config and inventory from sanitized examples.")
 
     doctor = subparsers.add_parser("doctor", help="Validate configuration and RPC identity.")
     doctor.add_argument("--online", action="store_true", help="Call enabled RPC endpoints.")
@@ -110,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument(
         "--send",
         action="store_true",
-        help="Send to configured Telegram; printing is the safe default.",
+        help="Send to configured Telegram; printing is the default.",
     )
 
     incidents = subparsers.add_parser(
@@ -135,6 +140,37 @@ def build_parser() -> argparse.ArgumentParser:
         "health", help="Check scanner heartbeats and return non-zero for stale services."
     )
     health.add_argument("--stale-after", type=int, help="Override the configured stale threshold.")
+
+    simulate = subparsers.add_parser(
+        "simulate", help="Run a state-pinned read-only simulation for a watched transaction."
+    )
+    simulate.add_argument("--chain", required=True, help="One configured chain name.")
+    simulate.add_argument("--tx-hash", required=True, help="Transaction hash available to the RPC.")
+    simulate.add_argument(
+        "--block",
+        type=int,
+        help="Pinned block number; defaults to current head.",
+    )
+    simulate.add_argument("--trace", action="store_true", help="Request a callTracer summary.")
+
+    proxy = subparsers.add_parser(
+        "inspect-proxy", help="Inspect EIP-1967, beacon, implementation, and UUPS state."
+    )
+    proxy.add_argument("--chain", required=True, help="One configured chain name.")
+    proxy.add_argument("--address", required=True, help="Proxy address.")
+    proxy.add_argument("--block", type=int, help="Pinned block number; defaults to current head.")
+
+    invariants = subparsers.add_parser(
+        "check-invariants", help="Evaluate protocol invariants at a confirmed block."
+    )
+    invariants.add_argument("--chain", required=True, help="One configured chain name.")
+
+    abi = subparsers.add_parser(
+        "abi", help="Resolve and cache a verified function-selector catalog."
+    )
+    abi.add_argument("--chain", required=True, help="One configured chain name.")
+    abi.add_argument("--address", required=True, help="Contract address.")
+    abi.add_argument("--refresh", action="store_true", help="Refresh the cached catalog.")
     return parser
 
 
@@ -232,25 +268,46 @@ def cmd_doctor(settings: Settings, watchlist: Watchlist, *, online: bool) -> int
         }
     )
     for chain in enabled:
-        url_present = bool(os.getenv(chain.rpc_http_env, "").strip())
+        endpoint_envs = (chain.rpc_http_env, *chain.rpc_http_fallback_envs)
+        present = [name for name in endpoint_envs if os.getenv(name, "").strip()]
         entry: dict[str, object] = {
             "check": f"rpc:{chain.name}",
-            "ok": url_present,
-            "detail": f"environment variable {chain.rpc_http_env}",
+            "ok": bool(os.getenv(chain.rpc_http_env, "").strip()),
+            "detail": {
+                "configured_endpoint_variables": list(endpoint_envs),
+                "present_endpoint_variables": present,
+            },
         }
-        if online and url_present:
-            try:
-                rpc = JsonRpcClient(
-                    os.environ[chain.rpc_http_env],
-                    timeout=settings.app.request_timeout_seconds,
-                    retries=settings.app.request_retries,
-                )
-                actual = rpc.chain_id()
-                entry["ok"] = actual == chain.chain_id
-                entry["detail"] = {"expected_chain_id": chain.chain_id, "actual_chain_id": actual}
-            except Exception as exc:
-                entry["ok"] = False
-                entry["detail"] = f"RPC check failed: {exc}"
+        if online and entry["ok"]:
+            endpoint_results: list[dict[str, object]] = []
+            for name in present:
+                try:
+                    rpc = JsonRpcClient(
+                        os.environ[name],
+                        timeout=settings.app.request_timeout_seconds,
+                        retries=settings.app.request_retries,
+                    )
+                    actual = rpc.chain_id()
+                    endpoint_results.append(
+                        {
+                            "environment_variable": name,
+                            "ok": actual == chain.chain_id,
+                            "expected_chain_id": chain.chain_id,
+                            "actual_chain_id": actual,
+                        }
+                    )
+                except Exception as exc:
+                    endpoint_results.append(
+                        {
+                            "environment_variable": name,
+                            "ok": False,
+                            "error_class": type(exc).__name__,
+                        }
+                    )
+            entry["ok"] = bool(endpoint_results) and all(
+                bool(item["ok"]) for item in endpoint_results
+            )
+            entry["detail"] = endpoint_results
         checks.append(entry)
     if settings.telegram.enabled:
         checks.append(
@@ -449,11 +506,9 @@ def cmd_incident_transition(
 def _expected_health_services(settings: Settings, watchlist: Watchlist) -> set[tuple[str, int]]:
     expected = {("confirmed_scanner", chain.chain_id) for chain in settings.enabled_chains()}
     for chain in settings.enabled_chains():
-        if (
-            chain.rpc_ws_env
-            and os.getenv(chain.rpc_ws_env, "").strip()
-            and watchlist.addresses_for_chain(chain.chain_id)
-        ):
+        if configured_endpoints(
+            chain.rpc_ws_env, chain.rpc_ws_fallback_envs
+        ) and watchlist.addresses_for_chain(chain.chain_id):
             expected.add(("pending_observer", chain.chain_id))
     return expected
 
@@ -475,6 +530,110 @@ def cmd_health(
     )
     print(json.dumps(snapshot, indent=2))
     return 0 if snapshot["ok"] else 1
+
+
+def _rpc_for_chain(settings: Settings, chain: ChainConfig) -> JsonRpcClient:
+    endpoints = configured_endpoints(chain.rpc_http_env, chain.rpc_http_fallback_envs)
+    if not endpoints:
+        raise ConfigurationError(f"No HTTP RPC endpoint is configured for {chain.name}")
+    rpc = JsonRpcClient(
+        endpoints,
+        timeout=settings.app.request_timeout_seconds,
+        retries=settings.app.request_retries,
+    )
+    actual_chain_id = rpc.chain_id()
+    if actual_chain_id != chain.chain_id:
+        raise ConfigurationError(
+            f"RPC chain mismatch for {chain.name}: expected {chain.chain_id}, "
+            f"received {actual_chain_id}"
+        )
+    return rpc
+
+
+def _validated_address(address: str) -> str:
+    normalized = address.lower()
+    if not ADDRESS_RE.fullmatch(normalized):
+        raise ConfigurationError(f"Invalid contract address: {address}")
+    return normalized
+
+
+def cmd_simulate(
+    settings: Settings,
+    watchlist: Watchlist,
+    *,
+    chain_name: str,
+    tx_hash: str,
+    block_number: int | None,
+    trace: bool,
+) -> int:
+    chain = settings.chain_by_name(chain_name)
+    rpc = _rpc_for_chain(settings, chain)
+    transaction = rpc.transaction(tx_hash)
+    if not transaction:
+        raise RuntimeError("The transaction is not available from the configured RPC endpoints")
+    destination = str(transaction.get("to") or "").lower()
+    if not watchlist.contract(chain.chain_id, destination):
+        raise ConfigurationError("Simulation is limited to destinations in watchlist.toml")
+    result = simulate_transaction(
+        rpc,
+        transaction,
+        block_number=block_number,
+        include_trace=trace,
+    )
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0
+
+
+def cmd_proxy_inspect(
+    settings: Settings,
+    *,
+    chain_name: str,
+    address: str,
+    block_number: int | None,
+) -> int:
+    chain = settings.chain_by_name(chain_name)
+    snapshot = inspect_proxy(
+        _rpc_for_chain(settings, chain),
+        _validated_address(address),
+        block_number=block_number,
+    )
+    print(json.dumps(snapshot.to_dict(), indent=2))
+    return 0
+
+
+def cmd_abi(
+    settings: Settings,
+    store: RadarStore,
+    *,
+    chain_name: str,
+    address: str,
+    refresh: bool,
+) -> int:
+    chain = settings.chain_by_name(chain_name)
+    normalized_address = _validated_address(address)
+    resolver = AbiResolver(
+        store,
+        timeout=settings.app.request_timeout_seconds,
+        retries=settings.app.request_retries,
+    )
+    selectors, source, digest = resolver.catalog(
+        chain.chain_id,
+        normalized_address,
+        refresh=refresh,
+    )
+    print(
+        json.dumps(
+            {
+                "chain": chain.name,
+                "address": normalized_address,
+                "source": source,
+                "abi_sha256": digest,
+                "selectors": selectors,
+            },
+            indent=2,
+        )
+    )
+    return 0 if selectors else 1
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -610,6 +769,43 @@ def main(argv: list[str] | None = None) -> None:
                 watchlist,
                 store,
                 stale_after=args.stale_after,
+            )
+        elif args.command == "simulate":
+            code = cmd_simulate(
+                settings,
+                watchlist,
+                chain_name=args.chain,
+                tx_hash=args.tx_hash,
+                block_number=args.block,
+                trace=args.trace,
+            )
+        elif args.command == "inspect-proxy":
+            code = cmd_proxy_inspect(
+                settings,
+                chain_name=args.chain,
+                address=args.address,
+                block_number=args.block,
+            )
+        elif args.command == "check-invariants":
+            chain = settings.chain_by_name(args.chain)
+            if not chain.enabled:
+                raise ConfigurationError(f"Chain is disabled: {chain.name}")
+            scanner = ChainScanner(
+                settings=settings,
+                chain=chain,
+                watchlist=watchlist,
+                store=store,
+                notifier=notifier,
+            )
+            print(json.dumps(scanner.check_invariants().to_dict(), indent=2))
+            code = 0
+        elif args.command == "abi":
+            code = cmd_abi(
+                settings,
+                store,
+                chain_name=args.chain,
+                address=args.address,
+                refresh=args.refresh,
             )
         else:
             parser.error(f"Unknown command: {args.command}")

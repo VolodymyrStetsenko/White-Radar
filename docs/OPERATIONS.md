@@ -1,36 +1,150 @@
 # Operations
 
-## Local service
+## Workload topology
+
+A complete single-host deployment separates five workloads:
+
+| Workload | Process | Cadence |
+|---|---|---|
+| Confirmed ingestion | `white-radar daemon` | Continuous |
+| Pending observation | `white-radar watch-pending --chain NAME` | Continuous per chain |
+| Profile refresh | `white-radar refresh-profiles` | Scheduled |
+| Digest | `white-radar digest` | Scheduled |
+| Health verification | `white-radar health` | Scheduled and externally observed |
+
+All workloads share the same configuration and SQLite database. WAL mode supports the expected
+single-host concurrency. Do not run multiple confirmed scanners for the same chain/database.
+
+## Local installation
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e .
+
 white-radar init
+white-radar doctor
 white-radar doctor --online
-white-radar run-once --chain ethereum
-white-radar refresh-profiles --chain ethereum --limit 25 --min-age-minutes 10
-white-radar health
-white-radar incidents --status new
 ```
 
-Keep `WHITE_RADAR_DRY_RUN=true` until event scoring and alert previews have been reviewed.
+The online doctor checks every configured HTTP endpoint independently and confirms its chain ID
+without printing endpoint values.
 
-## Mainnet rollout checklist
+Run a bounded end-to-end cycle:
 
-- [ ] use a dedicated provider key with only the required products;
-- [ ] verify every endpoint with `doctor --online`;
-- [ ] keep all signer/private-key material outside this host;
-- [ ] store `.env`, `watchlist.toml`, and `data/` outside the public repository;
-- [ ] start with one chain and a small confirmed range;
-- [ ] inspect event volume and RPC usage for 24 hours;
-- [ ] tune confirmations and `max_blocks_per_cycle`;
-- [ ] add only authorized watchlist records;
-- [ ] preview Telegram cases before enabling delivery;
-- [ ] back up the SQLite database and periodically export JSONL evidence;
-- [ ] configure host monitoring for process restarts, disk space, and clock drift.
-- [ ] configure the heartbeat timer and alert on a non-zero `white-radar health` result;
-- [ ] review protocol policies and acknowledgement SLAs with the scope owner.
+```bash
+white-radar run-once --chain ethereum
+white-radar check-invariants --chain ethereum
+white-radar refresh-profiles --chain ethereum --limit 10 --min-age-minutes 0
+white-radar status
+white-radar preview-alert
+```
+
+Run continuous workloads in separate terminals:
+
+```bash
+white-radar daemon --chain ethereum
+```
+
+```bash
+white-radar watch-pending --chain ethereum
+```
+
+## Configuration deployment
+
+Keep runtime configuration outside the application checkout in production:
+
+- environment: `/etc/white-radar/white-radar.env`;
+- application configuration: `/etc/white-radar/config.toml`;
+- protocol inventory: `/etc/white-radar/watchlist.toml`;
+- policy pack: `/etc/white-radar/policies.toml`;
+- database: `/var/lib/white-radar/white-radar.sqlite3`.
+
+Set file permissions so the service account can read configuration and write only the data
+directory.
+
+## RPC redundancy
+
+Configure an ordered provider set through environment-variable names:
+
+```toml
+rpc_http_env = "RPC_ETHEREUM_HTTP"
+rpc_http_fallback_envs = ["RPC_ETHEREUM_HTTP_SECONDARY"]
+rpc_ws_env = "RPC_ETHEREUM_WS"
+rpc_ws_fallback_envs = ["RPC_ETHEREUM_WS_SECONDARY"]
+```
+
+Use independent provider infrastructure when outage correlation matters. `doctor --online`
+validates every present HTTP endpoint. Runtime HTTP calls rotate on transport/method failures;
+pending observers rotate WebSocket endpoints after disconnects.
+
+The heartbeat payload exposes endpoint index and endpoint count, never endpoint URLs.
+
+## Analysis controls
+
+```toml
+[analysis]
+abi_resolution_enabled = true
+pending_simulation_enabled = true
+pending_simulation_minimum_score = 70
+trace_call_enabled = false
+invariant_checks_enabled = true
+```
+
+Operational impact:
+
+| Setting | RPC/external cost |
+|---|---|
+| `abi_resolution_enabled` | Explorer request on uncached verified contracts |
+| `pending_simulation_enabled` | One `eth_call` for selected pending cases |
+| `trace_call_enabled` | One provider-specific `debug_traceCall` for selected cases |
+| `invariant_checks_enabled` | One `eth_call` per configured invariant per scanner cycle |
+| `trace_internal_creations` | One `debug_traceTransaction` per eligible confirmed transaction |
+
+Start with bounded inventory and thresholds, record provider consumption, then tune the cadence and
+limits.
+
+## systemd
+
+The provided units assume:
+
+- checkout: `/opt/white-radar`;
+- virtual environment: `/opt/white-radar/.venv`;
+- service account: `white-radar`;
+- external configuration and data paths described above.
+
+Install and enable the full workload set:
+
+```bash
+sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+
+sudo systemctl enable --now white-radar.service
+sudo systemctl enable --now white-radar-pending@ethereum.service
+sudo systemctl enable --now white-radar-refresh@ethereum.timer
+sudo systemctl enable --now white-radar-health.timer
+```
+
+Enable Telegram digests after a successful manual send:
+
+```bash
+white-radar --config /etc/white-radar/config.toml digest --hours 1 --send
+sudo systemctl enable --now white-radar-digest.timer
+```
+
+Inspect services:
+
+```bash
+systemctl status white-radar.service
+systemctl status white-radar-pending@ethereum.service
+systemctl list-timers 'white-radar*'
+journalctl -u white-radar.service -f
+```
+
+The units use a dedicated account, an empty capability set, a read-only application/configuration
+filesystem, restricted address families, private temporary/device namespaces, and a single writable
+data path.
 
 ## Docker Compose
 
@@ -43,137 +157,127 @@ mkdir -p data
 
 docker compose build
 docker compose run --rm white-radar doctor --online
-docker compose up -d
-docker compose logs -f white-radar
+docker compose up -d white-radar
 ```
 
-The container runs as a non-root user, drops Linux capabilities, uses a read-only root filesystem,
-and writes only to the mounted `data/` directory.
-
-## systemd
-
-The example unit assumes:
-
-- repository: `/opt/white-radar`;
-- virtual environment: `/opt/white-radar/.venv`;
-- secrets: `/etc/white-radar/white-radar.env`;
-- configuration: `/etc/white-radar/config.toml`;
-- watchlist: `/etc/white-radar/watchlist.toml`;
-- policy pack: `/etc/white-radar/policies.toml`;
-- data: `/var/lib/white-radar`;
-- service account: `white-radar`.
-
-Review and adjust paths before installation. The service unit applies filesystem, privilege, kernel,
-device, and network-family restrictions. It permits outbound IPv4/IPv6 because RPC, explorer, and
-Telegram APIs are required.
-
-The included units separate workloads so a pending-stream or enrichment failure cannot stop the
-confirmed scanner:
+The Compose service runs the confirmed scanner. Run additional one-off commands in the same
+container image:
 
 ```bash
-# Confirmed-block scanner.
-sudo systemctl enable --now white-radar.service
-
-# Pending observer for one explicitly configured and authorized chain.
-sudo systemctl enable --now white-radar-pending@ethereum.service
-
-# Bounded profile re-enrichment every ten minutes.
-sudo systemctl enable --now white-radar-refresh@ethereum.timer
-
-# Optional hourly Telegram digest; enable only after a successful manual --send test.
-sudo systemctl enable --now white-radar-digest.timer
-
-# Local heartbeat verification every minute.
-sudo systemctl enable --now white-radar-health.timer
+docker compose run --rm white-radar check-invariants --chain ethereum
+docker compose run --rm white-radar inspect-proxy \
+  --chain ethereum \
+  --address 0x1111111111111111111111111111111111111111
 ```
 
-Inspect `systemctl list-timers 'white-radar*'` and provider usage after rollout. Do not enable trace
-or refresh workloads until the provider plan and quota have been checked.
+For a complete continuous multi-process topology, systemd is the included orchestrator.
 
-## Backups
+## Telegram activation
 
-For a consistent live SQLite backup, use SQLite's backup command or stop the service before copying
-the database. Copying only the main file while WAL writes are active may be incomplete.
-
-Also export portable evidence:
+Keep `WHITE_RADAR_DRY_RUN=true` while verifying rendering:
 
 ```bash
-white-radar export evidence/events-$(date -u +%Y%m%dT%H%M%SZ).jsonl
-```
-
-## Recovery
-
-1. Stop the service.
-2. Restore the database and verify ownership/permissions.
-3. Run `white-radar status`.
-4. Run `white-radar doctor --online`.
-5. Start one `run-once` cycle and inspect its block range.
-6. Resume the daemon.
-
-Do not manually move a cursor forward to hide a failed range. If a provider cannot serve the range,
-switch to a compatible endpoint or restore from the last known-good backup.
-
-## Key rotation
-
-Rotate a credential immediately if it was included in an archive, pasted into a public issue,
-committed, logged, or otherwise disclosed. Update the environment file and restart the service.
-Never rely on deleting Git history as the only remediation.
-
-## Pending observer
-
-Run pending monitoring as a separate process so it cannot starve confirmed-block ingestion:
-
-```bash
-white-radar watch-pending --chain ethereum
-```
-
-Use a provider plan that explicitly supports the chosen subscription. The observer automatically
-reconnects with bounded exponential backoff, but provider-level gaps remain possible.
-
-On supported Alchemy networks, `pending_subscription = "auto"` uses a server-side destination
-filter. Set `pending_subscription = "standard"` to force the standard subscription. Set
-`pending_subscription = "alchemy"` only when the selected chain is documented as supported.
-
-## Trace-backed internal creations
-
-Internal creation discovery is disabled by default. Enable it for a chain only when all destination
-contracts in that chain's watchlist are within the authorized operating scope:
-
-```toml
-trace_internal_creations = true
-```
-
-The scanner traces only confirmed transactions whose top-level destination is watchlisted. Debug
-traces can be computationally expensive and may require a paid provider feature.
-
-## Profile refresh and digests
-
-Run a safe preview before scheduling either action:
-
-```bash
-white-radar refresh-profiles --chain ethereum --limit 10 --min-age-minutes 60
+white-radar events --limit 20
+white-radar preview-alert
 white-radar digest --hours 24
 ```
 
-`digest` prints by default. It sends only with `--send`, Telegram enabled, dry-run disabled, and
-valid credentials. `refresh-profiles` never broadcasts a transaction; it reads current public state
-and produces a case only when stored intelligence changes.
+Then set:
 
-## Incident operations
-
-```bash
-white-radar incidents --status new
-white-radar incident-transition \
-  --incident-id CASE_ID \
-  --status acknowledged \
-  --actor operator \
-  --note "Evidence review started."
-white-radar incident-transition \
-  --incident-id CASE_ID \
-  --status investigating \
-  --actor operator
+```dotenv
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+WHITE_RADAR_DRY_RUN=false
 ```
 
-Use `resolved` only when evidence supports a closed disposition. Use `false_positive` when the
-signal is confirmed to be benign. Terminal incidents are immutable through the CLI so corrections
-remain visible in the audit history rather than silently rewriting the case.
+Confirm one manual delivery before enabling the digest timer.
+
+## Health and external monitoring
+
+```bash
+white-radar status
+white-radar health
+white-radar health --stale-after 180
+```
+
+`health` exits non-zero for missing, stale, or degraded expected services. The local timer detects
+stale application heartbeats; an external host monitor must detect a complete machine, network, or
+timer failure.
+
+Recommended external checks:
+
+- systemd unit state and restart count;
+- `white-radar health` exit status;
+- database filesystem capacity and inode availability;
+- NTP/clock synchronization;
+- provider quota and error rate;
+- Telegram delivery failures;
+- age and verification status of the latest backup.
+
+## Evidence export
+
+```bash
+white-radar events --limit 100
+white-radar export evidence/events-$(date -u +%Y%m%dT%H%M%SZ).jsonl
+white-radar report --event-id CASE_ID --output evidence/CASE_ID.md
+white-radar graph --chain ethereum --address 0xADDRESS --depth 2
+```
+
+Evidence exports and reports can contain operational addresses and protocol context. Store them in
+the designated evidence location, not in the source tree.
+
+## Backups
+
+Use the SQLite backup API/CLI or stop all White Radar writers before copying the database. Copying
+only the main database file while WAL activity is present can omit committed pages.
+
+A backup procedure should record:
+
+- database checksum;
+- creation timestamp;
+- application commit;
+- configuration and policy digests;
+- restore-test status.
+
+## Recovery
+
+1. Stop confirmed, pending, and scheduled write workloads.
+2. Restore the database and verify service-account ownership.
+3. Run `white-radar status`.
+4. Run `white-radar doctor --online`.
+5. Run one bounded confirmed cycle.
+6. Inspect cursors, health, events, and incident counts.
+7. Restart the continuous workloads.
+
+Do not advance a cursor manually past an unreadable range. Switch providers or restore the last
+verified backup, then reprocess the range idempotently.
+
+## Credential rotation
+
+When rotating a provider, explorer, Telegram, or GitHub credential:
+
+1. issue the replacement;
+2. update only the external environment/secret store;
+3. restart affected services;
+4. run online doctor and a delivery test as applicable;
+5. revoke the previous credential;
+6. verify logs and repository history with the secret scanner.
+
+Repository history deletion is not a substitute for credential revocation.
+
+## Capacity planning
+
+Measure before changing limits:
+
+- blocks and transactions processed per cycle;
+- pending messages selected per minute;
+- `eth_call` and trace requests per case;
+- invariants per scanner cycle;
+- explorer cache hit rate;
+- SQLite growth and WAL checkpoint behavior;
+- alert count by score and event type;
+- false-positive disposition rate;
+- time from observation to acknowledgement.
+
+For multi-host ingestion or sustained high write concurrency, move to the database/queue topology
+described in the roadmap.

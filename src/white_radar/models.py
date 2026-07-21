@@ -62,6 +62,8 @@ class ChainConfig:
     monitor_global_upgrades: bool = False
     pending_subscription: str = "auto"
     trace_internal_creations: bool = False
+    rpc_http_fallback_envs: tuple[str, ...] = ()
+    rpc_ws_fallback_envs: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

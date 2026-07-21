@@ -4,10 +4,10 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import urllib.parse
 
-from white_radar.config import Settings, Watchlist
+from white_radar.abi import AbiResolver
+from white_radar.config import Settings, Watchlist, configured_endpoints
 from white_radar.logging import log_context
 from white_radar.models import (
     ChainConfig,
@@ -19,6 +19,7 @@ from white_radar.models import (
 from white_radar.policy import PolicyBook, assess_pending, load_policy_book
 from white_radar.rpc import JsonRpcClient, hex_to_int
 from white_radar.scoring import score_pending
+from white_radar.simulation import simulate_transaction
 from white_radar.storage import RadarStore
 from white_radar.telegram import TelegramNotifier
 
@@ -73,28 +74,27 @@ async def watch_pending_transactions(
     store: RadarStore,
     notifier: TelegramNotifier,
 ) -> None:
-    """Observe pending transactions to explicitly watched contracts without broadcasting."""
-    ws_url = os.getenv(chain.rpc_ws_env, "").strip()
-    http_url = os.getenv(chain.rpc_http_env, "").strip()
-    if not ws_url.startswith(("ws://", "wss://")):
+    """Observe pending transactions to configured contracts and create analysis cases."""
+    ws_urls = configured_endpoints(chain.rpc_ws_env, chain.rpc_ws_fallback_envs)
+    http_urls = configured_endpoints(chain.rpc_http_env, chain.rpc_http_fallback_envs)
+    if not ws_urls or any(not value.startswith(("ws://", "wss://")) for value in ws_urls):
         raise RuntimeError(f"Missing or invalid {chain.rpc_ws_env}")
-    if not http_url:
+    if not http_urls:
         raise RuntimeError(f"Missing {chain.rpc_http_env}")
     watched_addresses = watchlist.addresses_for_chain(chain.chain_id)
     if not watched_addresses:
-        raise RuntimeError(
-            "Pending monitoring requires at least one explicitly authorized contract "
-            "in watchlist.toml"
-        )
-    subscription_type, subscription_request = pending_subscription_request(
-        chain, ws_url, watched_addresses
-    )
+        raise RuntimeError("Pending monitoring requires at least one contract in watchlist.toml")
     policy_book = load_policy_book(settings.app.policy_path)
 
     from websockets.asyncio.client import connect
 
     rpc = JsonRpcClient(
-        http_url,
+        http_urls,
+        timeout=settings.app.request_timeout_seconds,
+        retries=settings.app.request_retries,
+    )
+    abi_resolver = AbiResolver(
+        store,
         timeout=settings.app.request_timeout_seconds,
         retries=settings.app.request_retries,
     )
@@ -102,7 +102,12 @@ async def watch_pending_transactions(
         raise RuntimeError("HTTP RPC chain does not match configured pending stream chain")
 
     backoff = 1
+    websocket_index = 0
     while True:
+        ws_url = ws_urls[websocket_index]
+        subscription_type, subscription_request = pending_subscription_request(
+            chain, ws_url, watched_addresses
+        )
         try:
             async with connect(
                 ws_url,
@@ -130,6 +135,9 @@ async def watch_pending_transactions(
                         "chain": chain.name,
                         "subscription_type": subscription_type,
                         "watched_contracts": len(watched_addresses),
+                        "websocket_endpoint_index": websocket_index,
+                        "websocket_endpoint_count": len(ws_urls),
+                        "http_endpoint_count": rpc.endpoint_count,
                     },
                 )
                 await _flush_alerts(chain=chain, store=store, notifier=notifier)
@@ -140,6 +148,9 @@ async def watch_pending_transactions(
                         chain=chain,
                         subscription_type=subscription_type,
                         watched_contracts=len(watched_addresses),
+                        websocket_endpoint_index=websocket_index,
+                        websocket_endpoint_count=len(ws_urls),
+                        http_endpoint_count=rpc.endpoint_count,
                     )
                 )
                 try:
@@ -155,6 +166,16 @@ async def watch_pending_transactions(
                             policy_book=policy_book,
                             incident_minimum_score=settings.app.incident_minimum_score,
                             incident_sla_minutes=settings.app.incident_sla_minutes,
+                            abi_resolver=(
+                                abi_resolver if settings.analysis.abi_resolution_enabled else None
+                            ),
+                            pending_simulation_enabled=(
+                                settings.analysis.pending_simulation_enabled
+                            ),
+                            pending_simulation_minimum_score=(
+                                settings.analysis.pending_simulation_minimum_score
+                            ),
+                            trace_call_enabled=settings.analysis.trace_call_enabled,
                         )
                 finally:
                     heartbeat.cancel()
@@ -169,11 +190,17 @@ async def watch_pending_transactions(
             )
             raise
         except Exception as exc:
+            websocket_index = (websocket_index + 1) % len(ws_urls)
             store.record_heartbeat(
                 service_name="pending_observer",
                 chain_id=chain.chain_id,
                 status="degraded",
-                details={"chain": chain.name, "retry_seconds": backoff},
+                details={
+                    "chain": chain.name,
+                    "retry_seconds": backoff,
+                    "next_websocket_endpoint_index": websocket_index,
+                    "websocket_endpoint_count": len(ws_urls),
+                },
                 last_error=type(exc).__name__,
             )
             LOGGER.error(
@@ -189,6 +216,9 @@ async def _heartbeat_loop(
     chain: ChainConfig,
     subscription_type: str,
     watched_contracts: int,
+    websocket_endpoint_index: int,
+    websocket_endpoint_count: int,
+    http_endpoint_count: int,
 ) -> None:
     while True:
         store.record_heartbeat(
@@ -198,6 +228,9 @@ async def _heartbeat_loop(
                 "chain": chain.name,
                 "subscription_type": subscription_type,
                 "watched_contracts": watched_contracts,
+                "websocket_endpoint_index": websocket_endpoint_index,
+                "websocket_endpoint_count": websocket_endpoint_count,
+                "http_endpoint_count": http_endpoint_count,
             },
         )
         await asyncio.sleep(30)
@@ -215,6 +248,10 @@ async def _handle_message(
     policy_book: PolicyBook | None = None,
     incident_minimum_score: int = 70,
     incident_sla_minutes: int = 30,
+    abi_resolver: AbiResolver | None = None,
+    pending_simulation_enabled: bool = False,
+    pending_simulation_minimum_score: int = 70,
+    trace_call_enabled: bool = False,
 ) -> None:
     try:
         message = json.loads(raw_message)
@@ -261,11 +298,32 @@ async def _handle_message(
     reasons = score.reasons + (
         tuple(finding.reason for finding in assessment.findings) if assessment else ()
     )
+    decoded_call = None
+    if abi_resolver:
+        decoded_call = await asyncio.to_thread(
+            abi_resolver.resolve,
+            chain.chain_id,
+            destination,
+            calldata,
+            fallback_signature=policy.selector_label(selector) if policy else None,
+        )
+    simulation = None
+    if pending_simulation_enabled and (
+        final_score >= pending_simulation_minimum_score or policy_critical
+    ):
+        simulation = await asyncio.to_thread(
+            simulate_transaction,
+            rpc,
+            transaction,
+            include_trace=trace_call_enabled,
+        )
+        final_score = min(100, final_score + simulation.score_delta)
+        reasons += tuple(item.summary for item in simulation.findings)
     event = RadarEvent(
         event_id=stable_event_id("pending_watch", chain.chain_id, tx_hash),
         observed_at=utc_now(),
         event_type="pending_watch",
-        title="Pending transaction to watched contract",
+        title="Pending transaction to protocol inventory contract",
         summary=f"Pending transaction targets {watched.protocol} ({watched.role}).",
         chain=chain.name,
         chain_id=chain.chain_id,
@@ -285,6 +343,10 @@ async def _handle_message(
             "protocol": watched.protocol,
             "role": watched.role,
             "selector": selector,
+            "function_signature": decoded_call.signature if decoded_call else None,
+            "decoded_arguments": decoded_call.arguments if decoded_call else {},
+            "abi_source": decoded_call.source if decoded_call else None,
+            "abi_sha256": decoded_call.abi_sha256 if decoded_call else None,
             "critical_selector": selector in watched.critical_selectors or policy_critical,
             "native_value_wei": native_value,
             "calldata_size_bytes": max(0, (len(calldata.removeprefix("0x")) // 2)),
@@ -302,6 +364,7 @@ async def _handle_message(
                 [finding.to_dict() for finding in assessment.findings] if assessment else []
             ),
             "policy_sha256": policy_book.source_sha256 if policy and policy_book else None,
+            "simulation": simulation.to_dict() if simulation else None,
         },
     )
     if not store.add_event(event):

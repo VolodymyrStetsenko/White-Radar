@@ -67,20 +67,20 @@ def score_deployment(
     if watched_deployer_label:
         score += 35
         confidence += 0.15
-        reasons.append(f"The deployer is on the authorized watchlist: {watched_deployer_label}.")
+        reasons.append(f"The deployer is in the protocol inventory: {watched_deployer_label}.")
 
     score = min(100, score)
     confidence = min(0.98, confidence)
     severity = severity_for_score(score)
     if watched_deployer_label or severity.value in {"high", "critical"}:
         action = (
-            "Review the transaction, linked contracts, published scope, and release notes. "
-            "Escalate privately only through the protocol's authorized security channel."
+            "Correlate the transaction, linked contracts, release artifacts, and change window. "
+            "Route unexpected findings through the configured incident contact."
         )
     elif metadata.is_proxy or cluster_size >= 2:
         action = (
-            "Correlate the deployment cluster with the project's official repository and "
-            "published security scope before starting any deeper analysis."
+            "Correlate the deployment cluster with release artifacts, proxy state, verified "
+            "metadata, and the monitored protocol inventory."
         )
     else:
         action = "No immediate action. Retain as evidence and wait for additional identity signals."
@@ -93,14 +93,14 @@ def score_upgrade(*, watched_protocol: str | None, global_scan: bool) -> ScoreRe
     reasons = ["A standard proxy control-plane event was emitted on-chain."]
     if watched_protocol:
         score = 85
-        reasons.append(f"The proxy belongs to the authorized watchlist: {watched_protocol}.")
+        reasons.append(f"The proxy belongs to the protocol inventory: {watched_protocol}.")
         action = (
             "Immediately verify the implementation, release commit, storage-layout checks, "
             "and the protocol's approved incident procedure."
         )
     else:
-        reasons.append("The proxy is not currently associated with an authorized watchlist entry.")
-        action = "Retain the signal and identify the owner before any security research."
+        reasons.append("The proxy is not associated with a configured protocol inventory entry.")
+        action = "Retain the signal and enrich the proxy control plane before prioritization."
     return ScoreResult(score, confidence, tuple(reasons), action)
 
 
@@ -121,8 +121,8 @@ def score_pending(
         score += 5
         reasons.append("The transaction includes native asset value.")
     action = (
-        "Observe and preserve evidence. Do not replay, replace, front-run, or otherwise "
-        "broadcast a competing transaction. Use the authorized incident channel."
+        "Review the policy baseline, decoded function, state-pinned simulation, related "
+        "addresses, and protocol change window; escalate unexpected behavior."
     )
     return ScoreResult(min(100, score), min(0.95, confidence), tuple(reasons), action)
 
@@ -153,12 +153,11 @@ def score_profile_change(
         reasons.append("The explorer-reported contract identity changed.")
     if watched_protocol:
         score = min(100, score + 10)
-        reasons.append(f"The contract is in the authorized watchlist: {watched_protocol}.")
+        reasons.append(f"The contract is in the protocol inventory: {watched_protocol}.")
     if not reasons:
         reasons.append("Stored contract intelligence changed during scheduled re-enrichment.")
     action = (
-        "Compare the new state with the protocol's approved release, governance, and incident "
-        "records. Validate through independent public RPC and explorer sources, then use the "
-        "authorized private security channel if the change is unexpected."
+        "Compare the new state with release, governance, and incident records. Validate through "
+        "independent RPC and explorer sources, then escalate unexplained drift."
     )
     return ScoreResult(score, confidence, tuple(reasons), action)

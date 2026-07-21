@@ -70,6 +70,19 @@ def render_event(event: RadarEvent, chain: ChainConfig) -> str:
             lines.append(f"<b>Implementation:</b> <code>{_safe(metadata['implementation'])}</code>")
     if metadata.get("selector"):
         lines.append(f"<b>Selector:</b> <code>{_safe(metadata['selector'])}</code>")
+    if metadata.get("function_signature"):
+        lines.append(f"<b>Function:</b> <code>{_safe(metadata['function_signature'])}</code>")
+    decoded_arguments = metadata.get("decoded_arguments")
+    if isinstance(decoded_arguments, dict) and decoded_arguments:
+        compact_arguments = json.dumps(
+            decoded_arguments,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )[:300]
+        lines.append(f"<b>Arguments:</b> <code>{_safe(compact_arguments)}</code>")
+    if metadata.get("abi_source"):
+        lines.append(f"<b>ABI source:</b> {_safe(metadata['abi_source'])}")
     if metadata.get("native_value_wei") is not None:
         lines.append(f"<b>Native value:</b> {_safe(metadata['native_value_wei'])} wei")
     if metadata.get("policy_configured"):
@@ -84,6 +97,60 @@ def render_event(event: RadarEvent, chain: ChainConfig) -> str:
             ]
             if codes:
                 lines.append(f"<b>Policy findings:</b> {_safe(', '.join(codes[:5]))}")
+    simulation = metadata.get("simulation")
+    if isinstance(simulation, dict):
+        lines.append(
+            f"<b>Simulation:</b> {_safe(simulation.get('status', 'unknown'))} at block "
+            f"{_safe(simulation.get('block_number', '?'))}"
+        )
+        trace = simulation.get("trace")
+        if isinstance(trace, dict):
+            lines.append(
+                "<b>Call graph:</b> {} frames · depth {} · delegatecall {} · create {}".format(
+                    _safe(trace.get("call_count", 0)),
+                    _safe(trace.get("max_depth", 0)),
+                    _safe(trace.get("delegatecall_count", 0)),
+                    _safe(trace.get("create_count", 0)),
+                )
+            )
+            lines.append(
+                "<b>Runtime flags:</b> value {} · reverted {} · selfdestruct {}".format(
+                    _safe(trace.get("value_call_count", 0)),
+                    _safe(trace.get("reverted_call_count", 0)),
+                    _safe(trace.get("selfdestruct_count", 0)),
+                )
+            )
+        findings = simulation.get("findings")
+        if isinstance(findings, list):
+            finding_codes = [
+                str(item.get("code"))
+                for item in findings
+                if isinstance(item, dict) and item.get("code")
+            ]
+            if finding_codes:
+                lines.append(f"<b>Simulation findings:</b> {_safe(', '.join(finding_codes[:5]))}")
+    invariant = metadata.get("invariant")
+    if isinstance(invariant, dict):
+        lines.append(
+            f"<b>Invariant:</b> {_safe(invariant.get('name', 'unknown'))} · "
+            f"{_safe(invariant.get('status', 'unknown')).upper()}"
+        )
+        lines.append(f"<b>Observed:</b> <code>{_safe(invariant.get('observed'))}</code>")
+        lines.append(
+            f"<b>Expectation:</b> {_safe(invariant.get('operator', '?'))} "
+            f"<code>{_safe(invariant.get('expected'))}</code>"
+        )
+    proxy_snapshot = metadata.get("proxy_snapshot")
+    if isinstance(proxy_snapshot, dict) and proxy_snapshot.get("effective_implementation"):
+        lines.append(
+            "<b>Effective implementation:</b> <code>{}</code>".format(
+                _safe(proxy_snapshot["effective_implementation"])
+            )
+        )
+        if proxy_snapshot.get("admin"):
+            lines.append(f"<b>Proxy admin:</b> <code>{_safe(proxy_snapshot['admin'])}</code>")
+        if proxy_snapshot.get("beacon"):
+            lines.append(f"<b>Proxy beacon:</b> <code>{_safe(proxy_snapshot['beacon'])}</code>")
 
     lines.extend(["", "<b>Why this surfaced</b>"])
     lines.extend(f"• {_safe(reason)}" for reason in event.reasons[:5])
@@ -118,7 +185,7 @@ def event_buttons(event: RadarEvent, chain: ChainConfig) -> list[list[dict[str, 
         )
     bounty = event.metadata.get("bounty_url")
     if isinstance(bounty, str) and bounty.startswith("https://"):
-        buttons.append({"text": "Authorized scope", "url": bounty})
+        buttons.append({"text": "Security policy", "url": bounty})
     return [buttons] if buttons else []
 
 

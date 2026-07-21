@@ -1,71 +1,51 @@
 # White Radar
 
-White Radar is a read-only, multi-chain security monitoring and incident-triage system for
-EVM protocols. It turns raw deployments, proxy control events, and explicitly scoped pending
-transactions into normalized, explainable cases instead of sending low-context address spam.
+White Radar is a multi-chain protocol-defense monitoring and incident-intelligence platform for
+EVM networks. It converts confirmed-chain activity, selected pending transactions, proxy control
+state, verified interfaces, protocol invariants, runtime fingerprints, and relationship evidence
+into normalized cases that can be investigated and reported.
 
-The current release is a production-oriented monitoring foundation. It does **not** sign,
-broadcast, replace, replay, front-run, or copy transactions, and it never accepts a private key.
+The engine is deliberately read-only. Its JSON-RPC boundary exposes chain reads, state-pinned
+`eth_call`, and bounded debug traces; it contains no wallet, signer, raw-transaction builder, or
+broadcast path.
 
-## What it does
+## Capabilities
 
-- scans confirmation-safe block ranges on multiple EVM networks;
-- detects successful top-level contract deployments and, when explicitly enabled, internal
-  `CREATE`/`CREATE2` operations reached through authorized watchlist contracts;
-- enriches contracts with Sourcify, Etherscan API V2, and EIP-1967 proxy state;
-- correlates contracts created by the same deployer during a 24-hour release window;
-- fingerprints normalized runtime bytecode and links exact or high-similarity contract families;
-- builds an evidence-backed identity graph across protocols, contracts, deployers, senders,
-  implementations, admins, beacons, and bytecode relationships;
-- monitors standard proxy upgrade/admin/beacon events globally or for an allowlisted scope;
-- observes pending transactions only when they target explicitly authorized watchlist addresses;
-- compares pending metadata with deterministic protocol policy baselines for approved senders,
-  selectors, native-value limits, and response SLAs;
-- periodically re-enriches stored profiles and surfaces runtime, verification, or proxy-state drift;
-- assigns an explainable priority score with evidence and a recommended next action;
-- promotes high-priority events into auditable incidents with acknowledgement deadlines and
-  controlled state transitions;
-- records per-service heartbeats and exposes a machine-readable 24/7 health check;
-- persists cursors, deployments, profiles, graph evidence, cases, and a retryable alert outbox;
-- sends structured Telegram cases with explorer links and related-contract context;
-- produces Markdown incident reports, Telegram digests, JSON logs, and normalized JSONL evidence.
+| Area | Capability |
+|---|---|
+| Multi-chain ingestion | Independent confirmed-block scanners with chain-ID validation, confirmation delays, cursors, bounded ranges, and HTTP endpoint failover |
+| Deployment intelligence | Top-level deployments plus optional trace-backed internal `CREATE` and `CREATE2` discovery for protocol inventory targets |
+| Contract intelligence | Sourcify/Etherscan verification, EIP-1967 state, UUPS inspection, runtime-code fingerprints, normalized hashes, and similarity families |
+| Pending intelligence | Provider-aware WebSocket subscriptions filtered to configured destinations, local policy evaluation, ABI labels, and optional state-pinned simulation |
+| Protocol invariants | Configurable read calls evaluated at the confirmation-safe head, with transition-only violation and recovery events |
+| Runtime analysis | `eth_call` outcome, bounded `callTracer` summary, touched-address set, execution depth, delegated calls, creations, value flow, and destructive frames |
+| Correlation | Evidence-backed graph relationships across protocols, contracts, deployers, senders, implementations, admins, beacons, and code families |
+| Incident operations | Explainable priority, incident SLAs, audited state transitions, Markdown reports, JSONL evidence, Telegram cases, and windowed digests |
+| Reliability | SQLite WAL storage, idempotent events, retryable alert outbox, service heartbeats, health checks, reconnect backoff, and endpoint failover |
 
-## Safety invariant
-
-The JSON-RPC client uses a fixed allowlist of read methods. Any unapproved method—including
-`eth_sendTransaction` and `eth_sendRawTransaction`—raises `ReadOnlyViolation` before a network
-request is made. The test suite enforces this invariant.
-
-White Radar is not an autonomous response bot. Moving assets or executing a protocol action
-requires the asset owner's prior written authorization, an exact scope, a separately reviewed
-response system, and human approval. Public identity, company registration, or an intention to
-return funds does not substitute for authorization.
-
-## Architecture
+## System architecture
 
 ```mermaid
 flowchart TD
-    RPC["EVM HTTP / WebSocket RPC"] --> Guard["Read-only RPC guard"]
-    Guard --> Confirmed["Confirmed-block scanner"]
-    Guard --> Pending["Watchlist-only pending observer"]
-    Explorer["Sourcify / Etherscan V2"] --> Enrich["Identity and proxy enrichment"]
-    Confirmed --> Enrich
-    Enrich --> Score["Correlation and explainable scoring"]
-    Pending --> Score
-    Score --> Store["Profiles, graph, cases and alert outbox"]
-    Store --> Telegram["Telegram triage"]
-    Store --> Export["JSONL export"]
+    Sources["HTTP / WebSocket RPC<br/>Sourcify / Etherscan"] --> Guard["Read-only RPC boundary<br/>endpoint failover"]
+    Guard --> Confirmed["Confirmed scanner<br/>deployments / upgrades / invariants"]
+    Guard --> Pending["Pending observer<br/>policy / ABI / simulation"]
+    Confirmed --> Analysis["Proxy / bytecode / trace<br/>correlation engine"]
+    Pending --> Analysis
+    Analysis --> Store["SQLite evidence store<br/>incidents / graph / outbox"]
+    Store --> Outputs["Telegram / reports<br/>JSONL / health"]
 ```
 
-See [Architecture](docs/ARCHITECTURE.md) and [Threat model](docs/THREAT_MODEL.md).
+See [Architecture](docs/ARCHITECTURE.md), [Detection coverage](docs/DETECTION_COVERAGE.md), and
+[Threat model](docs/THREAT_MODEL.md).
 
 ## Quick start
 
 Requirements:
 
 - Python 3.11 or newer;
-- an HTTP RPC URL for every enabled chain;
-- a WebSocket RPC URL only if pending monitoring is used;
+- one HTTP JSON-RPC endpoint for each enabled chain;
+- a WebSocket endpoint for pending monitoring;
 - optional Etherscan and Telegram credentials.
 
 ```bash
@@ -80,50 +60,53 @@ python -m pip install -e .
 white-radar init
 ```
 
-`init` creates local `config.toml`, `watchlist.toml`, `.env`, and `data/` only when they do not
-already exist. Existing files are preserved.
+`init` creates `config.toml`, `watchlist.toml`, `policies.toml`, `.env`, and `data/`
+without replacing existing files.
 
-Add an RPC endpoint to `.env`:
+Configure local environment variables:
 
 ```dotenv
-RPC_ETHEREUM_HTTP=https://your-provider-endpoint
+RPC_ETHEREUM_HTTP=https://primary-provider-endpoint
+RPC_ETHEREUM_HTTP_SECONDARY=https://secondary-provider-endpoint
+RPC_ETHEREUM_WS=wss://primary-provider-endpoint
+RPC_ETHEREUM_WS_SECONDARY=wss://secondary-provider-endpoint
+ETHERSCAN_API_KEY=
 WHITE_RADAR_DRY_RUN=true
 ```
 
-Validate without exposing credential values:
+Validate configuration and every configured HTTP endpoint:
 
 ```bash
 white-radar doctor
 white-radar doctor --online
 ```
 
-Run one confirmed range:
+Run one bounded confirmed scan:
 
 ```bash
 white-radar run-once --chain ethereum
 ```
 
-Run continuously:
+Run the confirmed scanner continuously:
 
 ```bash
 white-radar daemon --chain ethereum
 ```
 
-## Enabling additional networks
+## Chain and provider configuration
 
-Each `[[chains]]` entry in `config.toml` has its own chain ID, confirmation delay, bounded range,
-explorer, and environment-variable names. Set `enabled = true` only after adding the corresponding
-HTTP endpoint to `.env` and verifying it with `doctor --online`.
+Every `[[chains]]` record defines its chain ID, endpoint environment-variable names,
+confirmations, range limits, explorer, pending subscription mode, and trace settings. The example
+configuration includes Ethereum, Base, Arbitrum One, OP Mainnet, Polygon PoS, and Sepolia.
 
-The example configuration includes Ethereum, Base, Arbitrum One, OP Mainnet, Polygon PoS, and
-Sepolia. An Alchemy account may expose several networks, but each configured endpoint is still
-validated against `eth_chainId`; a mismatched endpoint stops that chain rather than corrupting
-state.
+Primary and fallback RPC values remain in `.env`. White Radar validates each HTTP endpoint against
+`eth_chainId` and rotates to a fallback after transport failure, malformed data, or a missing RPC
+method. Deterministic execution errors are returned to the analysis layer instead of being hidden
+by failover.
 
-## Authorized watchlist
+## Protocol inventory
 
-Operational watchlists should stay private. Add only owned contracts, contracted client scope, or
-targets explicitly covered by a published vulnerability-disclosure or bug-bounty policy.
+`watchlist.toml` defines the contracts and deployment accounts that receive deeper analysis:
 
 ```toml
 [[contracts]]
@@ -141,86 +124,155 @@ address = "0x2222222222222222222222222222222222222222"
 label = "Example Protocol release deployer"
 ```
 
-`critical_selectors` are protocol-supplied triage markers. They do not prove malicious intent.
+Confirmed deployment discovery can remain global. Pending analysis, manual transaction simulation,
+and trace-backed internal creation analysis use the protocol inventory to keep expensive processing
+bounded and relevant.
 
-## Pending monitoring
+## Policy baselines and invariants
 
-Pending monitoring is a separate, explicit command and refuses to start without at least one
-watchlisted contract on the selected chain:
+`policies.toml` adds contract-specific operating baselines:
+
+```toml
+schema_version = 2
+
+[[protocols]]
+chain_id = 1
+address = "0x1111111111111111111111111111111111111111"
+protocol = "Example Protocol"
+authorized_senders = ["0x2222222222222222222222222222222222222222"]
+allowed_selectors = ["0x12345678"]
+critical_selectors = ["0x12345678"]
+max_native_value_wei = 0
+incident_sla_minutes = 15
+selector_labels = { "0x12345678" = "sensitiveOperation(uint256)" }
+
+[[protocols.invariants]]
+name = "paused state"
+call_data = "0x5c975abb"
+decode_as = "bool"
+operator = "eq"
+expected = false
+score = 90
+alert_on_error = true
+```
+
+Invariant return decoders support `uint256`, `int256`, `address`, `bool`, and `bytes32`.
+Operators support `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `zero`, and `nonzero`.
+Checks are pinned to a confirmed block and stored as state. Events are emitted only when an
+invariant changes into a violation/error state or recovers.
+
+```bash
+white-radar check-invariants --chain ethereum
+```
+
+See [Policy and incident operations](docs/POLICY_AND_INCIDENTS.md).
+
+## Pending monitoring and simulation
+
+Start one pending observer:
 
 ```bash
 white-radar watch-pending --chain ethereum
 ```
 
-It records only transaction metadata needed for triage: hash, sender, destination, selector,
-calldata size, value, and fee fields. It does not store full calldata and cannot broadcast a
-transaction.
+Supported Alchemy networks use a destination-filtered `alchemy_pendingTransactions` subscription
+when `pending_subscription = "auto"`. Other endpoints use
+`newPendingTransactions`, followed by a read-only lookup and local destination filter.
 
-With `pending_subscription = "auto"`, supported Alchemy networks use a server-side
-`alchemy_pendingTransactions` destination filter and full transaction objects. Other providers use
-the standard `newPendingTransactions` subscription followed by a read-only metadata lookup and a
-local watchlist filter. The Alchemy filter is currently limited to 1,000 destination addresses.
+For each selected transaction, White Radar records only bounded triage metadata. It retains the
+selector, calldata size, fee/value fields, and a SHA-256 transaction fingerprint rather than full
+calldata.
 
-Provider mempool visibility is partial. A provider exposes only the pending transactions visible
-to its infrastructure, not a guaranteed view of every transaction in the network. Therefore White
-Radar makes no claim of millisecond-complete or universal attack detection.
+Enable automatic state-pinned simulation in `config.toml`:
 
-## Intelligence and reports
-
-Every stored deployment receives raw and Solidity-metadata-normalized SHA-256 fingerprints plus a
-bounded SimHash similarity sketch. These are identity and triage signals, not vulnerability proof.
-
-```bash
-# Re-check a bounded batch for verification, bytecode, or proxy-state drift.
-white-radar refresh-profiles --chain ethereum --limit 25 --min-age-minutes 10
-
-# Explore evidence-backed relationships around one address.
-white-radar graph --chain ethereum --address 0x1111111111111111111111111111111111111111
-
-# Produce a reproducible Markdown report for the newest case.
-white-radar report --output evidence/latest-case.md
-
-# Preview a 24-hour Telegram-compatible summary; add --send only after review.
-white-radar digest --hours 24
+```toml
+[analysis]
+abi_resolution_enabled = true
+pending_simulation_enabled = true
+pending_simulation_minimum_score = 70
+trace_call_enabled = false
+invariant_checks_enabled = true
 ```
 
-The identity graph records the evidence behind each edge. It does not identify the real-world
-person controlling an address and must not be used as proof of attribution. See
-[Security intelligence](docs/INTELLIGENCE.md).
-
-## Protocol policies and incident workflow
-
-`policies.toml` is an ignored local file for protocol-approved operational baselines. It can define
-authorized senders, allowed and critical selectors, a maximum native-value baseline, and a
-protocol-specific acknowledgement SLA for each watched contract. White Radar stores the SHA-256
-of the loaded file with policy-backed events so an operator can identify which baseline produced a
-finding. It never treats a baseline deviation as proof of malicious intent.
+Manual analysis is available for a transaction whose destination is present in `watchlist.toml`:
 
 ```bash
-cp policies.example.toml policies.toml
-white-radar doctor
+white-radar simulate \
+  --chain ethereum \
+  --tx-hash 0xTRANSACTION_HASH \
+  --trace
+```
+
+The result includes a pinned block number/hash, execution outcome, return-data size/hash, bounded
+call-graph summary, explainable runtime findings, and a deterministic fingerprint. No transaction
+is constructed or submitted.
+
+## ABI and proxy intelligence
+
+Resolve and cache a verified selector catalog:
+
+```bash
+white-radar abi \
+  --chain ethereum \
+  --address 0x1111111111111111111111111111111111111111 \
+  --refresh
+```
+
+The resolver uses Etherscan API V2, computes Ethereum Keccak selectors locally, caps ABI input size
+and entry count, and stores a selector map plus the ABI SHA-256. Pending cases can include a verified
+function signature and bounded decoding of static arguments.
+
+Inspect proxy state at a specific block:
+
+```bash
+white-radar inspect-proxy \
+  --chain ethereum \
+  --address 0x1111111111111111111111111111111111111111 \
+  --block 21000000
+```
+
+The snapshot covers EIP-1967 implementation, admin and beacon slots; beacon resolution; effective
+implementation runtime fingerprint; and UUPS `proxiableUUID()` compatibility.
+
+## Correlation, reports, and incident workflow
+
+```bash
+# Re-enrich code, verification, and proxy state.
+white-radar refresh-profiles --chain ethereum --limit 25 --min-age-minutes 10
+
+# Export a bounded evidence graph.
+white-radar graph \
+  --chain ethereum \
+  --address 0x1111111111111111111111111111111111111111 \
+  --depth 2
+
+# Render a reproducible incident report.
+white-radar report --output evidence/latest-case.md
+
+# Inspect and transition incident state.
 white-radar incidents --status new
 white-radar incident-transition \
   --incident-id CASE_ID \
   --status acknowledged \
   --actor operator \
-  --note "Independent evidence review started."
-white-radar health
+  --note "Evidence review started."
+
+# Render a rolling operations digest.
+white-radar digest --hours 24
 ```
 
-See [Policy and incident operations](docs/POLICY_AND_INCIDENTS.md).
+The evidence graph records the source of every relationship. The incident state machine records
+every transition with its actor, note, prior state, new state, and timestamp.
 
 ## Telegram
 
-Keep `WHITE_RADAR_DRY_RUN=true` until alert previews are correct. Then configure:
+Configure Telegram only in the ignored `.env` file:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 WHITE_RADAR_DRY_RUN=false
 ```
-
-In `config.toml`:
 
 ```toml
 [telegram]
@@ -229,71 +281,82 @@ minimum_score = 60
 send_testnet_alerts = false
 ```
 
-Preview the newest stored case without sending it:
+Preview before delivery:
 
 ```bash
 white-radar preview-alert
 ```
 
-An alert includes the chain, block, contract, deployer, verification source, contract name,
-bytecode size, proxy implementation, related deployment cluster, score reasons, action guidance,
-case ID, and direct explorer buttons. See [Telegram alerts](docs/TELEGRAM.md).
+Case cards can include protocol/function identity, sender, destination, block, value and fees,
+policy findings, simulation status, trace summary, invariant state, proxy implementation, related
+deployments, score reasons, case ID, and explorer links. See
+[Telegram alerts](docs/TELEGRAM.md).
 
-## Operations
+## 24/7 operation
+
+White Radar ships separate hardened systemd workloads for:
+
+- confirmed scanning;
+- one pending observer per chain;
+- scheduled profile refresh;
+- hourly digest generation;
+- heartbeat verification.
+
+```bash
+sudo systemctl enable --now white-radar.service
+sudo systemctl enable --now white-radar-pending@ethereum.service
+sudo systemctl enable --now white-radar-refresh@ethereum.timer
+sudo systemctl enable --now white-radar-health.timer
+```
+
+Operational visibility:
 
 ```bash
 white-radar status
 white-radar health
-white-radar incidents --limit 50
 white-radar events --limit 20
 white-radar export evidence/events.jsonl
 ```
 
-Docker Compose and hardened systemd units are included for confirmed scanning, authorized pending
-observation, scheduled profile refresh, heartbeat verification, and optional hourly digests. Read
-[Operations](docs/OPERATIONS.md) before enabling a 24/7 service.
+Docker Compose is also included. See [Operations](docs/OPERATIONS.md) for deployment, backup,
+recovery, quota sizing, service isolation, and credential rotation.
 
-The source can be public because secrets, runtime data, and operational watchlists are excluded. If
-the implementation itself must remain confidential, follow [Repository privacy](docs/REPOSITORY_PRIVACY.md)
-before adding real operational context.
+## Runtime guarantees
+
+- The RPC client rejects methods outside a fixed read-only allowlist before network dispatch.
+- No private-key, seed-phrase, wallet, signing, or transaction-broadcast configuration exists.
+- Chain IDs are verified before analysis.
+- Confirmed cursors advance only after successful block processing.
+- Events and incidents are idempotent.
+- Full pending calldata and raw ABI documents are not stored in the operational database.
+- Endpoint-bearing exceptions and credentials are not copied into heartbeat records.
+- Alert delivery is isolated through a retryable outbox.
 
 ## Validation
 
-The local suite has no live-network dependency:
-
 ```bash
-python -m unittest discover -s tests -v
+ruff format --check .
+ruff check .
+mypy src
+pytest --cov=white_radar --cov-report=term-missing --cov-fail-under=80
 python -m compileall -q src
 python scripts/check_secrets.py
 ```
 
-CI additionally runs Ruff, mypy, pytest, coverage, and secret-pattern checks on Python 3.11 and
-3.12.
+CI runs the same quality gates on Python 3.11 and 3.12.
 
-## Current boundaries
+## Detection boundaries
 
-- Top-level deployments are detected globally. Trace-backed internal `CREATE`/`CREATE2` discovery
-  is opt-in and limited to transactions targeting explicitly watched contracts.
-- Trace availability, cost, and retention depend on the RPC provider and plan.
-- Scheduled re-enrichment is bounded; its cadence must be sized for the provider quota.
-- Priority is a triage score, not a vulnerability verdict or proof of malicious activity.
-- Pending visibility depends on the selected provider and network.
-- The evidence graph links on-chain and operator-supplied scope facts; it is not personal identity
-  attribution.
-- SQLite is appropriate for a single-node deployment. Horizontal workers require PostgreSQL and a
+- Pending visibility is provider-specific and cannot represent every private order flow or builder.
+- `eth_call` and `debug_traceCall` model the selected state and provider implementation; they
+  are analysis evidence, not a complete prediction of inclusion ordering or future block state.
+- Trace methods and historical state availability depend on provider capability and retention.
+- On-chain observations can correlate addresses and code but do not establish real-world identity.
+- Priority is an explainable triage score, not a vulnerability verdict.
+- SQLite targets a single host. Multi-host workers require a transactional shared database and
   queue.
-- No automated asset movement, exploit replication, or transaction competition is implemented.
-- Policy findings describe baseline differences; they require independent evidence and human
-  validation.
 
-See [Roadmap](ROADMAP.md) for the next engineering milestones.
-
-## Responsible use
-
-Read [Authorization and disclosure](docs/AUTHORIZATION.md) before monitoring a live protocol. In
-the United Kingdom, the Crown Prosecution Service guidance on the Computer Misuse Act emphasizes
-whether access was authorized and whether the actor knew it was unauthorized. Bug-bounty rewards
-and percentages are contractual program terms, not an automatic statutory entitlement.
+See [Roadmap](ROADMAP.md) for current engineering priorities.
 
 ## Project ownership
 
@@ -301,15 +364,13 @@ White Radar is developed and maintained by **Volodymyr Stetsenko**.
 
 Copyright © 2026 Volodymyr Stetsenko. All rights reserved. See [LICENSE](LICENSE).
 
-## Official references
+## Primary references
 
 - [Ethereum JSON-RPC API](https://ethereum.org/developers/docs/apis/json-rpc/)
+- [Geth debug namespace](https://geth.ethereum.org/docs/interacting-with-geth/rpc/ns-debug)
 - [Geth real-time subscriptions](https://geth.ethereum.org/docs/interacting-with-geth/rpc/pubsub)
-- [Alchemy pending transaction subscriptions](https://www.alchemy.com/docs/reference/alchemy-pendingtransactions)
-- [Alchemy WebSocket best practices](https://www.alchemy.com/docs/reference/best-practices-for-using-websockets-in-web3)
-- [Alchemy Debug API](https://www.alchemy.com/docs/reference/debug-api-quickstart)
-- [Geth built-in tracers](https://geth.ethereum.org/docs/developers/evm-tracing/built-in-tracers)
-- [Etherscan API V2 introduction](https://docs.etherscan.io/introduction)
-- [Solidity contract metadata](https://docs.soliditylang.org/en/latest/metadata.html)
-- [ERC-1967 proxy storage slots](https://eips.ethereum.org/EIPS/eip-1967)
-- [CPS Computer Misuse Act guidance](https://www.cps.gov.uk/prosecution-guidance/computer-misuse-act)
+- [EIP-1967 proxy storage slots](https://eips.ethereum.org/EIPS/eip-1967)
+- [EIP-1822 universal upgradeable proxy standard](https://eips.ethereum.org/EIPS/eip-1822)
+- [Etherscan API V2](https://docs.etherscan.io/introduction)
+- [OWASP Smart Contract Top 10](https://owasp.org/www-project-smart-contract-top-10/)
+- [NIST SP 800-61 Rev. 3](https://csrc.nist.gov/pubs/sp/800/61/r3/final)

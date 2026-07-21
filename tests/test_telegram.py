@@ -35,16 +35,37 @@ class TelegramFormattingTests(unittest.TestCase):
                 "protocol": "Example",
                 "role": "proxy",
                 "selector": "0x12345678",
+                "function_signature": "review(uint256)",
+                "decoded_arguments": {"caseId": 7},
+                "abi_source": "Etherscan",
                 "native_value_wei": 1,
                 "policy_configured": True,
                 "policy_baseline_match": False,
                 "policy_findings": [{"code": "selector_outside_baseline"}],
+                "simulation": {
+                    "status": "succeeded",
+                    "block_number": 100,
+                    "trace": {
+                        "call_count": 2,
+                        "max_depth": 1,
+                        "delegatecall_count": 1,
+                        "create_count": 0,
+                        "value_call_count": 1,
+                        "reverted_call_count": 0,
+                        "selfdestruct_count": 0,
+                    },
+                    "findings": [{"code": "delegated_execution_path"}],
+                },
             },
         )
         text = render_event(event, ETHEREUM)
         self.assertIn("Sender:", text)
         self.assertIn("Policy baseline:</b> REVIEW", text)
         self.assertIn("selector_outside_baseline", text)
+        self.assertIn("review(uint256)", text)
+        self.assertIn("caseId", text)
+        self.assertIn("Runtime flags", text)
+        self.assertIn("delegated_execution_path", text)
 
     def test_notifier_delivers_and_respects_dry_run(self) -> None:
         config = TelegramConfig(enabled=True, minimum_score=60, send_testnet_alerts=False)

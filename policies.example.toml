@@ -1,7 +1,7 @@
 # Copy this file to policies.toml. Operational protocol baselines should remain private.
 # A policy is a triage baseline, not proof that an out-of-baseline transaction is malicious.
 
-schema_version = 1
+schema_version = 2
 
 # [[protocols]]
 # chain_id = 1
@@ -12,3 +12,14 @@ schema_version = 1
 # critical_selectors = ["0x12345678"]
 # max_native_value_wei = 0
 # incident_sla_minutes = 15
+# selector_labels = { "0x12345678" = "sensitiveOperation(uint256)" }
+#
+# [[protocols.invariants]]
+# name = "paused state"
+# target = "0x0000000000000000000000000000000000000000"
+# call_data = "0x5c975abb" # paused()
+# decode_as = "bool"
+# operator = "eq"
+# expected = false
+# score = 90
+# alert_on_error = true

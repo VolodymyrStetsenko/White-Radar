@@ -20,6 +20,17 @@ send_testnet_alerts = false
 sourcify_enabled = true
 etherscan_enabled = true
 
+[analysis]
+# ABI labels enrich pending alerts from verified explorer metadata.
+abi_resolution_enabled = true
+# State-pinned eth_call analysis is opt-in because it adds one or more RPC calls per selected case.
+pending_simulation_enabled = false
+pending_simulation_minimum_score = 70
+# debug_traceCall provides a bounded call-graph summary when the provider supports it.
+trace_call_enabled = false
+# Protocol invariants are evaluated at the confirmation-safe head during scanner cycles.
+invariant_checks_enabled = true
+
 # Confirmed-block scanners are read-only. A chain with a missing RPC variable is skipped.
 [[chains]]
 name = "ethereum"
@@ -29,6 +40,8 @@ enabled = true
 is_testnet = false
 rpc_http_env = "RPC_ETHEREUM_HTTP"
 rpc_ws_env = "RPC_ETHEREUM_WS"
+rpc_http_fallback_envs = ["RPC_ETHEREUM_HTTP_SECONDARY"]
+rpc_ws_fallback_envs = ["RPC_ETHEREUM_WS_SECONDARY"]
 explorer_url = "https://etherscan.io"
 confirmations = 3
 initial_lookback_blocks = 3

@@ -24,17 +24,17 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(result.score, 100)
         self.assertGreaterEqual(len(result.reasons), 6)
-        self.assertIn("authorized watchlist", " ".join(result.reasons))
+        self.assertIn("protocol inventory", " ".join(result.reasons))
 
-    def test_pending_action_forbids_replay(self) -> None:
+    def test_pending_action_prioritizes_evidence_review(self) -> None:
         result = score_pending(
             protocol="Example",
             critical_selector=True,
             native_value_wei=1,
         )
         self.assertGreaterEqual(result.score, 80)
-        self.assertIn("Do not replay", result.recommended_action)
-        self.assertIn("front-run", result.recommended_action)
+        self.assertIn("state-pinned simulation", result.recommended_action)
+        self.assertIn("protocol change window", result.recommended_action)
 
     def test_runtime_profile_drift_is_high_priority(self) -> None:
         result = score_profile_change(

@@ -8,8 +8,10 @@ substantial change.
 - preserve the read-only RPC invariant;
 - never add a signer, seed phrase, private key, raw-transaction builder, or broadcast method;
 - keep secrets, operational watchlists, and runtime data out of commits;
-- add deterministic tests for scoring, cursor behavior, deduplication, and alert formatting;
-- treat priority as triage, not proof of a vulnerability or malicious actor;
+- add deterministic tests for parsing, failover, pinned analysis, persistence, scoring, cursors,
+  deduplication, and output formatting;
+- preserve chain ID, block number/hash, policy digest, and data-source provenance in evidence;
+- bound external documents, traces, graph traversal, retries, and batch sizes;
 - update documentation and the changelog for operator-visible behavior;
 - use official primary documentation for provider and protocol behavior.
 
@@ -21,7 +23,7 @@ python -m compileall -q src
 python scripts/check_secrets.py
 ruff check .
 mypy src
-pytest --cov=white_radar --cov-report=term-missing
+pytest --cov=white_radar --cov-report=term-missing --cov-fail-under=80
 ```
 
 ## Commit hygiene
