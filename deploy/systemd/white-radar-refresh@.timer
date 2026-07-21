@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule White Radar profile refresh for %i
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=10m
+RandomizedDelaySec=30s
+Persistent=true
+Unit=white-radar-refresh@%i.service
+
+[Install]
+WantedBy=timers.target

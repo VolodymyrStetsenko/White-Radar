@@ -1,0 +1,26 @@
+services:
+  white-radar:
+    build:
+      context: .
+    image: white-radar:0.1.0
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./watchlist.toml:/app/watchlist.toml:ro
+      - ./data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "white-radar", "--config", "/app/config.toml", "doctor"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

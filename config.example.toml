@@ -1,0 +1,114 @@
+[app]
+database_path = "data/white-radar.sqlite3"
+watchlist_path = "watchlist.toml"
+poll_interval_seconds = 20
+request_timeout_seconds = 20
+request_retries = 3
+log_level = "INFO"
+dry_run = true
+
+[telegram]
+enabled = false
+minimum_score = 60
+send_testnet_alerts = false
+
+[enrichment]
+sourcify_enabled = true
+etherscan_enabled = true
+
+# Confirmed-block scanners are read-only. A chain with a missing RPC variable is skipped.
+[[chains]]
+name = "ethereum"
+display_name = "Ethereum"
+chain_id = 1
+enabled = true
+is_testnet = false
+rpc_http_env = "RPC_ETHEREUM_HTTP"
+rpc_ws_env = "RPC_ETHEREUM_WS"
+explorer_url = "https://etherscan.io"
+confirmations = 3
+initial_lookback_blocks = 3
+max_blocks_per_cycle = 12
+monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
+
+[[chains]]
+name = "base"
+display_name = "Base"
+chain_id = 8453
+enabled = false
+is_testnet = false
+rpc_http_env = "RPC_BASE_HTTP"
+rpc_ws_env = "RPC_BASE_WS"
+explorer_url = "https://basescan.org"
+confirmations = 5
+initial_lookback_blocks = 10
+max_blocks_per_cycle = 50
+monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
+
+[[chains]]
+name = "arbitrum"
+display_name = "Arbitrum One"
+chain_id = 42161
+enabled = false
+is_testnet = false
+rpc_http_env = "RPC_ARBITRUM_HTTP"
+rpc_ws_env = "RPC_ARBITRUM_WS"
+explorer_url = "https://arbiscan.io"
+confirmations = 20
+initial_lookback_blocks = 20
+max_blocks_per_cycle = 100
+monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
+
+[[chains]]
+name = "optimism"
+display_name = "OP Mainnet"
+chain_id = 10
+enabled = false
+is_testnet = false
+rpc_http_env = "RPC_OPTIMISM_HTTP"
+rpc_ws_env = "RPC_OPTIMISM_WS"
+explorer_url = "https://optimistic.etherscan.io"
+confirmations = 20
+initial_lookback_blocks = 20
+max_blocks_per_cycle = 100
+monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
+
+[[chains]]
+name = "polygon"
+display_name = "Polygon PoS"
+chain_id = 137
+enabled = false
+is_testnet = false
+rpc_http_env = "RPC_POLYGON_HTTP"
+rpc_ws_env = "RPC_POLYGON_WS"
+explorer_url = "https://polygonscan.com"
+confirmations = 64
+initial_lookback_blocks = 20
+max_blocks_per_cycle = 100
+monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
+
+[[chains]]
+name = "sepolia"
+display_name = "Ethereum Sepolia"
+chain_id = 11155111
+enabled = false
+is_testnet = true
+rpc_http_env = "RPC_SEPOLIA_HTTP"
+rpc_ws_env = "RPC_SEPOLIA_WS"
+explorer_url = "https://sepolia.etherscan.io"
+confirmations = 2
+initial_lookback_blocks = 10
+max_blocks_per_cycle = 30
+monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false

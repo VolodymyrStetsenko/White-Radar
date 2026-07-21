@@ -1,0 +1,38 @@
+[Unit]
+Description=White Radar confirmed-block security monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=white-radar
+Group=white-radar
+WorkingDirectory=/opt/white-radar
+EnvironmentFile=/etc/white-radar/white-radar.env
+ExecStart=/opt/white-radar/.venv/bin/white-radar --config /etc/white-radar/config.toml daemon
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadOnlyPaths=/etc/white-radar /opt/white-radar
+ReadWritePaths=/var/lib/white-radar
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# Keep operational watchlists private. Copy this file to watchlist.toml.
+# Only add protocols and contracts that you own, monitor for a client, or are explicitly
+# permitted to research under a published vulnerability-disclosure or bug-bounty policy.
+
+# [[contracts]]
+# chain_id = 1
+# address = "0x0000000000000000000000000000000000000000"
+# protocol = "Example Protocol"
+# role = "proxy"
+# bounty_url = "https://example.org/security"
+# contact_uri = "mailto:security@example.org"
+# critical_selectors = ["0x12345678"]
+
+# [[deployers]]
+# chain_id = 1
+# address = "0x0000000000000000000000000000000000000000"
+# label = "Example Protocol deployer"
