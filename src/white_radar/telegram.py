@@ -144,3 +144,29 @@ class TelegramNotifier:
         if not isinstance(response, dict) or not response.get("ok"):
             raise RuntimeError(f"Telegram rejected the alert: {json.dumps(response)[:300]}")
         return True
+
+    def send_digest(self, text: str) -> bool:
+        if not self.config.enabled or self.dry_run:
+            return False
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if not token or not chat_id:
+            raise RuntimeError("Telegram is enabled but TELEGRAM_BOT_TOKEN/CHAT_ID is missing")
+        try:
+            response = request_json(
+                "POST",
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                timeout=self.timeout,
+                retries=self.retries,
+                payload={
+                    "chat_id": chat_id,
+                    "text": text[:4000],
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+            )
+        except HttpError as exc:
+            raise RuntimeError(f"Telegram digest delivery failed: {exc}") from exc
+        if not isinstance(response, dict) or not response.get("ok"):
+            raise RuntimeError(f"Telegram rejected the digest: {json.dumps(response)[:300]}")
+        return True

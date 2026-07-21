@@ -39,7 +39,7 @@ jobs:
         run: mypy src
 
       - name: Test
-        run: pytest --cov=white_radar --cov-report=term-missing --cov-fail-under=75
+        run: pytest --cov=white_radar --cov-report=term-missing --cov-fail-under=80
 
       - name: Compile package
         run: python -m compileall -q src

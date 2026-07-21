@@ -25,6 +25,12 @@ SQLite for search and export. Testnet alerts are independently disabled by defau
 Pending alerts are generated only for explicitly watchlisted destinations. A selector match is a
 protocol-configured triage signal, not proof of an attack.
 
+## Digests
+
+`white-radar digest --hours 24` renders a compact summary of case counts by severity, network, and
+signal type plus the highest-priority cases. Printing is the default. `--send` is an explicit action
+and still respects Telegram configuration and dry-run mode.
+
 ## Safe rollout
 
 1. Keep `WHITE_RADAR_DRY_RUN=true`.

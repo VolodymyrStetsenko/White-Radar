@@ -7,6 +7,19 @@ independent review, but it also reveals the architecture and detection rules.
 Use a private repository when the code, client names, watchlist, deployment model, or operational
 thresholds are confidential.
 
+For a proprietary single-operator deployment, the recommended default is a private repository.
+Visibility can be reconsidered later after a deliberate public/private split.
+
+## Public/private split
+
+A public showcase repository may contain the product overview, redacted screenshots, high-level
+architecture, safety model, and sanitized examples. Keep detection policy packs, operational
+watchlists, real reports, client or protocol scope, provider topology, thresholds, deployment
+inventory, and private runbooks in a separate private repository.
+
+Never make a private engine a Git submodule of the public repository, and never copy live runtime
+data into a public demonstration branch.
+
 ## Make the GitHub repository private
 
 1. Open the repository on GitHub.

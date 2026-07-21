@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "white-radar"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only, multi-chain security monitoring and incident triage for EVM protocols."
 readme = "README.md"
 requires-python = ">=3.11"

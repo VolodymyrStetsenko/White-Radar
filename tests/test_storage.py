@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.common import sample_event
+from white_radar.fingerprint import fingerprint_bytecode
+from white_radar.models import ContractMetadata, utc_now
 from white_radar.storage import RadarStore
 
 
@@ -53,6 +56,76 @@ class StorageTests(unittest.TestCase):
             destination = root / "events.jsonl"
             self.assertEqual(store.export_jsonl(destination), 1)
             self.assertIn("case-123", destination.read_text(encoding="utf-8"))
+
+    def test_profiles_similarity_identity_graph_and_digest_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RadarStore(Path(directory) / "radar.sqlite3")
+            store.initialize()
+            first = fingerprint_bytecode("0x" + "6001600055" * 100)
+            second = fingerprint_bytecode("0x" + "6001600055" * 100)
+            metadata = ContractMetadata(verified=True, contract_name="Pool")
+            now = utc_now()
+            store.upsert_contract_profile(
+                chain_id=1,
+                address="0x" + "11" * 20,
+                fingerprint=first,
+                metadata=metadata,
+                observed_at=now,
+            )
+            matches = store.similar_contracts(
+                chain_id=1,
+                address="0x" + "22" * 20,
+                fingerprint=second,
+            )
+            self.assertEqual(len(matches), 1)
+            self.assertTrue(matches[0]["exact_normalized_match"])
+
+            source = store.upsert_identity_node(chain_id=1, kind="deployer", value="0x" + "aa" * 20)
+            target = store.upsert_identity_node(
+                chain_id=1,
+                kind="contract",
+                value="0x" + "11" * 20,
+                metadata={"verified": True},
+            )
+            edge = store.upsert_identity_edge(
+                chain_id=1,
+                source_node_id=source,
+                relation="DEPLOYED",
+                target_node_id=target,
+                evidence={"transaction": "0x1"},
+                observed_at=now,
+            )
+            self.assertEqual(
+                store.upsert_identity_edge(
+                    chain_id=1,
+                    source_node_id=source,
+                    relation="DEPLOYED",
+                    target_node_id=target,
+                    evidence={"transaction": "0x2"},
+                    observed_at=now,
+                ),
+                edge,
+            )
+            graph = store.identity_neighborhood(chain_id=1, value="0x" + "11" * 20, depth=2)
+            self.assertEqual(len(graph["nodes"]), 2)
+            self.assertEqual(graph["edges"][0]["evidence"]["transaction"], "0x2")
+            self.assertEqual(
+                store.identity_neighborhood(chain_id=1, value="missing"), {"nodes": [], "edges": []}
+            )
+
+            event = dataclasses.replace(sample_event(), observed_at=now)
+            store.add_event(event)
+            self.assertEqual(store.events_since(hours=1), [event])
+            self.assertEqual(
+                store.intelligence_counts(),
+                {"profiles": 1, "identity_nodes": 2, "identity_edges": 1},
+            )
+            due = store.profiles_due_for_refresh(
+                chain_id=1,
+                min_age_minutes=0,
+                limit=10,
+            )
+            self.assertEqual([item["address"] for item in due], ["0x" + "11" * 20])
 
 
 if __name__ == "__main__":

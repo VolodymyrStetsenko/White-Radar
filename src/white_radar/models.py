@@ -51,6 +51,8 @@ class ChainConfig:
     initial_lookback_blocks: int = 3
     max_blocks_per_cycle: int = 12
     monitor_global_upgrades: bool = False
+    pending_subscription: str = "auto"
+    trace_internal_creations: bool = False
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule White Radar hourly Telegram digest
+
+[Timer]
+OnBootSec=15m
+OnUnitActiveSec=1h
+RandomizedDelaySec=2m
+Persistent=true
+Unit=white-radar-digest.service
+
+[Install]
+WantedBy=timers.target

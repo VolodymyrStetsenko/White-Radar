@@ -30,6 +30,8 @@ confirmations = 3
 initial_lookback_blocks = 3
 max_blocks_per_cycle = 12
 monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
 
 [[chains]]
 name = "base"
@@ -44,6 +46,8 @@ confirmations = 5
 initial_lookback_blocks = 10
 max_blocks_per_cycle = 50
 monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
 
 [[chains]]
 name = "arbitrum"
@@ -58,6 +62,8 @@ confirmations = 20
 initial_lookback_blocks = 20
 max_blocks_per_cycle = 100
 monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
 
 [[chains]]
 name = "optimism"
@@ -72,6 +78,8 @@ confirmations = 20
 initial_lookback_blocks = 20
 max_blocks_per_cycle = 100
 monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
 
 [[chains]]
 name = "polygon"
@@ -86,6 +94,8 @@ confirmations = 64
 initial_lookback_blocks = 20
 max_blocks_per_cycle = 100
 monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false
 
 [[chains]]
 name = "sepolia"
@@ -100,3 +110,5 @@ confirmations = 2
 initial_lookback_blocks = 10
 max_blocks_per_cycle = 30
 monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false

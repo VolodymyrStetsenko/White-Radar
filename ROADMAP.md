@@ -14,13 +14,16 @@
 
 ## 0.2 — Signal quality
 
-- delayed re-enrichment for newly verified contracts;
-- verified-source fingerprints and bytecode similarity clusters;
-- protocol identity graph linking official repositories, domains, deployers, factories, proxies,
-  implementations, multisigs, and bounty scope;
-- configurable alert digests and per-protocol policies;
-- trace-backed internal `CREATE`/`CREATE2` discovery where the provider supports it;
-- PostgreSQL migration and background work queue.
+- [x] bounded delayed re-enrichment and material profile-drift cases;
+- [x] Solidity-metadata-normalized runtime fingerprints and similarity clusters;
+- [x] evidence-backed graph foundation for protocols, deployers, senders, contracts, proxies,
+  implementations, admins, beacons, and bytecode relationships;
+- [x] Markdown incident reports and configurable-window Telegram digests;
+- [x] watchlist-scoped internal `CREATE`/`CREATE2` discovery where traces are available;
+- [x] provider-aware filtered pending subscriptions on supported Alchemy networks;
+- [ ] signed per-protocol policy packs and approved identity assertions;
+- [ ] official repository, domain, multisig, and bounty-scope ingestion adapters;
+- [ ] PostgreSQL migration and background work queue.
 
 ## 0.3 — Authorized protocol defense
 

@@ -171,6 +171,9 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     seen_ids: set[int] = set()
     seen_names: set[str] = set()
     for item in data.get("chains", []):
+        pending_subscription = str(item.get("pending_subscription", "auto")).lower()
+        if pending_subscription not in {"auto", "alchemy", "standard"}:
+            raise ConfigurationError("pending_subscription must be one of: auto, alchemy, standard")
         chain = ChainConfig(
             name=str(item["name"]),
             display_name=str(item.get("display_name", item["name"])),
@@ -184,6 +187,8 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             initial_lookback_blocks=max(1, int(item.get("initial_lookback_blocks", 3))),
             max_blocks_per_cycle=max(1, int(item.get("max_blocks_per_cycle", 12))),
             monitor_global_upgrades=bool(item.get("monitor_global_upgrades", False)),
+            pending_subscription=pending_subscription,
+            trace_internal_creations=bool(item.get("trace_internal_creations", False)),
         )
         if chain.chain_id in seen_ids or chain.name in seen_names:
             raise ConfigurationError(f"Duplicate chain configuration: {chain.name}")

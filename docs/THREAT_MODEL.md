@@ -22,6 +22,10 @@
 | Public repository intelligence leak | Operational config/watchlist/data are ignored | Architecture remains public |
 | Database corruption | WAL mode; transactional writes; JSONL export | Single-node storage remains a failure domain |
 | Provider mempool blind spots | Explicit limitation and confirmed-chain follow-up | No provider sees the entire network |
+| Trace API cost or unavailability | Disabled by default; watchlist-only calls; bounded confirmed ranges | Provider-specific limits |
+| False bytecode-family inference | Exact hash separated from heuristic SimHash; evidence retained | Similarity is not common ownership |
+| Stale explorer or proxy metadata | Bounded scheduled re-enrichment and drift cases | Refresh cadence and third-party lag |
+| Graph over-attribution | Typed evidence edges and explicit non-attribution policy | Human interpretation error |
 
 ## Non-goals
 
@@ -29,7 +33,7 @@ White Radar does not claim to:
 
 - detect every exploit;
 - prove malicious intent from a transaction;
-- provide complete internal-call coverage without traces;
+- provide complete internal-call coverage outside enabled watchlist-scoped traces;
 - guarantee real-time delivery;
 - authorize security research;
 - execute a rescue or recover assets.

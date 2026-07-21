@@ -20,6 +20,8 @@ def score_deployment(
     bytecode_size: int,
     cluster_size: int,
     watched_deployer_label: str | None,
+    exact_match_count: int = 0,
+    similar_count: int = 0,
 ) -> ScoreResult:
     score = 10
     confidence = 0.55
@@ -52,6 +54,16 @@ def score_deployment(
     if cluster_size >= 5:
         score += 10
         reasons.append("Deployment activity forms a high-volume release cluster.")
+    if exact_match_count:
+        score += 10
+        reasons.append(
+            f"Normalized runtime bytecode exactly matches {exact_match_count} known contract(s)."
+        )
+    elif similar_count:
+        score += 5
+        reasons.append(
+            f"Runtime bytecode is structurally similar to {similar_count} known contract(s)."
+        )
     if watched_deployer_label:
         score += 35
         confidence += 0.15
@@ -113,3 +125,40 @@ def score_pending(
         "broadcast a competing transaction. Use the authorized incident channel."
     )
     return ScoreResult(min(100, score), min(0.95, confidence), tuple(reasons), action)
+
+
+def score_profile_change(
+    *,
+    changed_fields: frozenset[str],
+    watched_protocol: str | None,
+) -> ScoreResult:
+    """Prioritize evidence-backed drift without claiming malicious intent."""
+
+    score = 25
+    confidence = 0.9
+    reasons: list[str] = []
+    control_plane = changed_fields & {"implementation", "admin", "beacon"}
+    if "bytecode_sha256" in changed_fields or "normalized_sha256" in changed_fields:
+        score = max(score, 90)
+        confidence = 0.98
+        reasons.append("The observed runtime bytecode fingerprint changed.")
+    if control_plane:
+        score = max(score, 80)
+        reasons.append(
+            "Proxy control-plane state changed: " + ", ".join(sorted(control_plane)) + "."
+        )
+    if "verified" in changed_fields:
+        reasons.append("Explorer verification status changed after the initial observation.")
+    if "contract_name" in changed_fields:
+        reasons.append("The explorer-reported contract identity changed.")
+    if watched_protocol:
+        score = min(100, score + 10)
+        reasons.append(f"The contract is in the authorized watchlist: {watched_protocol}.")
+    if not reasons:
+        reasons.append("Stored contract intelligence changed during scheduled re-enrichment.")
+    action = (
+        "Compare the new state with the protocol's approved release, governance, and incident "
+        "records. Validate through independent public RPC and explorer sources, then use the "
+        "authorized private security channel if the change is unexpected."
+    )
+    return ScoreResult(score, confidence, tuple(reasons), action)

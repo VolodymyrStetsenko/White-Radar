@@ -17,6 +17,7 @@ READ_ONLY_RPC_METHODS = frozenset(
         "eth_getStorageAt",
         "eth_getTransactionByHash",
         "eth_getTransactionReceipt",
+        "debug_traceTransaction",
     }
 )
 
@@ -115,3 +116,16 @@ class JsonRpcClient:
             log_filter["address"] = addresses
         result = self.call("eth_getLogs", [log_filter])
         return [item for item in (result or []) if isinstance(item, dict)]
+
+    def trace_transaction(self, tx_hash: str) -> dict[str, Any] | None:
+        result = self.call(
+            "debug_traceTransaction",
+            [
+                tx_hash,
+                {
+                    "tracer": "callTracer",
+                    "tracerConfig": {"onlyTopCall": False, "withLog": False},
+                },
+            ],
+        )
+        return result if isinstance(result, dict) else None

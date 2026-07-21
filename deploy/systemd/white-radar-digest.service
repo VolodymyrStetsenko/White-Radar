@@ -1,0 +1,32 @@
+[Unit]
+Description=White Radar hourly Telegram digest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=white-radar
+Group=white-radar
+WorkingDirectory=/opt/white-radar
+EnvironmentFile=/etc/white-radar/white-radar.env
+ExecStart=/opt/white-radar/.venv/bin/white-radar --config /etc/white-radar/config.toml digest --hours 1 --send
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadOnlyPaths=/etc/white-radar /opt/white-radar
+ReadWritePaths=/var/lib/white-radar

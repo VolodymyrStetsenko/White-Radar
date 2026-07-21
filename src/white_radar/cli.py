@@ -22,8 +22,9 @@ from white_radar.config import (
 )
 from white_radar.logging import configure_logging, log_context
 from white_radar.mempool import watch_pending_transactions
-from white_radar.models import ChainConfig
+from white_radar.models import ChainConfig, RadarEvent
 from white_radar.monitor import ChainScanner
+from white_radar.reporting import render_digest, render_incident_report
 from white_radar.rpc import JsonRpcClient
 from white_radar.storage import RadarStore
 from white_radar.telegram import TelegramNotifier, render_event
@@ -61,6 +62,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pending.add_argument("--chain", required=True, help="One configured chain name.")
 
+    refresh = subparsers.add_parser(
+        "refresh-profiles",
+        help="Re-enrich a bounded batch of stored contract profiles and detect drift.",
+    )
+    refresh.add_argument("--chain", required=True, help="One configured chain name.")
+    refresh.add_argument("--limit", type=int, default=25, help="Maximum profiles (1-500).")
+    refresh.add_argument(
+        "--min-age-minutes",
+        type=int,
+        default=60,
+        help="Refresh profiles not checked within this interval.",
+    )
+
     subparsers.add_parser("status", help="Show local database counters and chain cursors.")
 
     recent = subparsers.add_parser("events", help="Print recent normalized events as JSON.")
@@ -73,6 +87,30 @@ def build_parser() -> argparse.ArgumentParser:
         "preview-alert", help="Render one stored event in Telegram HTML without sending it."
     )
     alert.add_argument("--event-id", help="Specific recent event ID; defaults to latest.")
+
+    graph = subparsers.add_parser(
+        "graph", help="Export the evidence-backed identity neighborhood for an address."
+    )
+    graph.add_argument("--chain", required=True, help="One configured chain name.")
+    graph.add_argument("--address", required=True, help="Seed address.")
+    graph.add_argument("--depth", type=int, default=2, help="Relationship depth (0-4).")
+
+    report = subparsers.add_parser(
+        "report", help="Create a Markdown incident-triage report from a stored case."
+    )
+    report.add_argument("--event-id", help="Specific recent event ID; defaults to latest.")
+    report.add_argument("--output", type=Path, help="Write Markdown to this path.")
+    report.add_argument("--graph-depth", type=int, default=2, help="Identity depth (0-4).")
+
+    digest = subparsers.add_parser(
+        "digest", help="Render a compact Telegram-compatible case digest."
+    )
+    digest.add_argument("--hours", type=int, default=24, help="Lookback window in hours.")
+    digest.add_argument(
+        "--send",
+        action="store_true",
+        help="Send to configured Telegram; printing is the safe default.",
+    )
     return parser
 
 
@@ -256,6 +294,66 @@ def cmd_preview(settings: Settings, store: RadarStore, event_id: str | None) -> 
     return 0
 
 
+def _find_event(store: RadarStore, event_id: str | None) -> RadarEvent | None:
+    events = store.recent_events(500 if event_id else 1)
+    if event_id:
+        return next((item for item in events if item.event_id == event_id), None)
+    return events[0] if events else None
+
+
+def cmd_report(
+    settings: Settings,
+    store: RadarStore,
+    *,
+    event_id: str | None,
+    output: Path | None,
+    graph_depth: int,
+) -> int:
+    event = _find_event(store, event_id)
+    if not isinstance(event, RadarEvent):
+        print("No matching event found.", file=sys.stderr)
+        return 1
+    chain = settings.chain_by_name(event.chain)
+    graph = (
+        store.identity_neighborhood(
+            chain_id=event.chain_id,
+            value=event.subject_address,
+            depth=graph_depth,
+        )
+        if event.subject_address
+        else None
+    )
+    report = render_incident_report(event, chain, graph=graph)
+    if output:
+        destination = output.expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(report, encoding="utf-8")
+        print(json.dumps({"event_id": event.event_id, "destination": str(destination)}))
+    else:
+        print(report, end="")
+    return 0
+
+
+def cmd_digest(
+    settings: Settings,
+    store: RadarStore,
+    notifier: TelegramNotifier,
+    *,
+    hours: int,
+    send: bool,
+) -> int:
+    bounded_hours = max(1, min(24 * 31, hours))
+    events = store.events_since(hours=bounded_hours)
+    chains = {chain.name: chain for chain in settings.chains}
+    digest = render_digest(events, chains, hours=bounded_hours)
+    print(digest)
+    if send and not notifier.send_digest(digest):
+        raise RuntimeError(
+            "Digest was not sent. Enable Telegram and set WHITE_RADAR_DRY_RUN=false first."
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -285,8 +383,34 @@ def main(argv: list[str] | None = None) -> None:
                 )
             )
             code = 0
+        elif args.command == "refresh-profiles":
+            chain = settings.chain_by_name(args.chain)
+            if not chain.enabled:
+                raise ConfigurationError(f"Chain is disabled: {chain.name}")
+            scanner = ChainScanner(
+                settings=settings,
+                chain=chain,
+                watchlist=watchlist,
+                store=store,
+                notifier=notifier,
+            )
+            result = scanner.refresh_profiles(
+                limit=max(1, min(500, args.limit)),
+                min_age_minutes=max(0, args.min_age_minutes),
+            )
+            print(json.dumps(result.to_dict(), indent=2))
+            code = 0
         elif args.command == "status":
-            print(json.dumps({"counts": store.counts(), "cursors": store.cursors()}, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "counts": store.counts(),
+                        "intelligence": store.intelligence_counts(),
+                        "cursors": store.cursors(),
+                    },
+                    indent=2,
+                )
+            )
             code = 0
         elif args.command == "events":
             for event in store.recent_events(max(1, min(500, args.limit))):
@@ -298,6 +422,35 @@ def main(argv: list[str] | None = None) -> None:
             code = 0
         elif args.command == "preview-alert":
             code = cmd_preview(settings, store, args.event_id)
+        elif args.command == "graph":
+            chain = settings.chain_by_name(args.chain)
+            print(
+                json.dumps(
+                    store.identity_neighborhood(
+                        chain_id=chain.chain_id,
+                        value=args.address,
+                        depth=args.depth,
+                    ),
+                    indent=2,
+                )
+            )
+            code = 0
+        elif args.command == "report":
+            code = cmd_report(
+                settings,
+                store,
+                event_id=args.event_id,
+                output=args.output,
+                graph_depth=args.graph_depth,
+            )
+        elif args.command == "digest":
+            code = cmd_digest(
+                settings,
+                store,
+                notifier,
+                hours=args.hours,
+                send=args.send,
+            )
         else:
             parser.error(f"Unknown command: {args.command}")
     except (ConfigurationError, RuntimeError) as exc:

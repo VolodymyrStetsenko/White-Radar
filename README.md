@@ -10,15 +10,20 @@ broadcast, replace, replay, front-run, or copy transactions, and it never accept
 ## What it does
 
 - scans confirmation-safe block ranges on multiple EVM networks;
-- detects successful top-level contract deployments;
+- detects successful top-level contract deployments and, when explicitly enabled, internal
+  `CREATE`/`CREATE2` operations reached through authorized watchlist contracts;
 - enriches contracts with Sourcify, Etherscan API V2, and EIP-1967 proxy state;
 - correlates contracts created by the same deployer during a 24-hour release window;
+- fingerprints normalized runtime bytecode and links exact or high-similarity contract families;
+- builds an evidence-backed identity graph across protocols, contracts, deployers, senders,
+  implementations, admins, beacons, and bytecode relationships;
 - monitors standard proxy upgrade/admin/beacon events globally or for an allowlisted scope;
 - observes pending transactions only when they target explicitly authorized watchlist addresses;
+- periodically re-enriches stored profiles and surfaces runtime, verification, or proxy-state drift;
 - assigns an explainable priority score with evidence and a recommended next action;
-- persists cursors, deployments, cases, and a retryable alert outbox in SQLite;
+- persists cursors, deployments, profiles, graph evidence, cases, and a retryable alert outbox;
 - sends structured Telegram cases with explorer links and related-contract context;
-- emits JSON logs and exports normalized JSONL evidence.
+- produces Markdown incident reports, Telegram digests, JSON logs, and normalized JSONL evidence.
 
 ## Safety invariant
 
@@ -42,7 +47,7 @@ flowchart TD
     Confirmed --> Enrich
     Enrich --> Score["Correlation and explainable scoring"]
     Pending --> Score
-    Score --> Store["SQLite evidence and alert outbox"]
+    Score --> Store["Profiles, graph, cases and alert outbox"]
     Store --> Telegram["Telegram triage"]
     Store --> Export["JSONL export"]
 ```
@@ -146,10 +151,37 @@ It records only transaction metadata needed for triage: hash, sender, destinatio
 calldata size, value, and fee fields. It does not store full calldata and cannot broadcast a
 transaction.
 
-Provider mempool visibility is partial. Alchemy documents that pending subscriptions expose the
-transactions visible in the Alchemy mempool, not a guaranteed view of every transaction in the
-network. Therefore White Radar makes no claim of millisecond-complete or universal attack
-detection.
+With `pending_subscription = "auto"`, supported Alchemy networks use a server-side
+`alchemy_pendingTransactions` destination filter and full transaction objects. Other providers use
+the standard `newPendingTransactions` subscription followed by a read-only metadata lookup and a
+local watchlist filter. The Alchemy filter is currently limited to 1,000 destination addresses.
+
+Provider mempool visibility is partial. A provider exposes only the pending transactions visible
+to its infrastructure, not a guaranteed view of every transaction in the network. Therefore White
+Radar makes no claim of millisecond-complete or universal attack detection.
+
+## Intelligence and reports
+
+Every stored deployment receives raw and Solidity-metadata-normalized SHA-256 fingerprints plus a
+bounded SimHash similarity sketch. These are identity and triage signals, not vulnerability proof.
+
+```bash
+# Re-check a bounded batch for verification, bytecode, or proxy-state drift.
+white-radar refresh-profiles --chain ethereum --limit 25 --min-age-minutes 10
+
+# Explore evidence-backed relationships around one address.
+white-radar graph --chain ethereum --address 0x1111111111111111111111111111111111111111
+
+# Produce a reproducible Markdown report for the newest case.
+white-radar report --output evidence/latest-case.md
+
+# Preview a 24-hour Telegram-compatible summary; add --send only after review.
+white-radar digest --hours 24
+```
+
+The identity graph records the evidence behind each edge. It does not identify the real-world
+person controlling an address and must not be used as proof of attribution. See
+[Security intelligence](docs/INTELLIGENCE.md).
 
 ## Telegram
 
@@ -188,8 +220,9 @@ white-radar events --limit 20
 white-radar export evidence/events.jsonl
 ```
 
-Docker Compose and a hardened systemd unit are included. Read [Operations](docs/OPERATIONS.md)
-before enabling a 24/7 service.
+Docker Compose and hardened systemd units are included for confirmed scanning, authorized pending
+observation, scheduled profile refresh, and optional hourly digests. Read
+[Operations](docs/OPERATIONS.md) before enabling a 24/7 service.
 
 The source can be public because secrets, runtime data, and operational watchlists are excluded. If
 the implementation itself must remain confidential, follow [Repository privacy](docs/REPOSITORY_PRIVACY.md)
@@ -210,11 +243,14 @@ CI additionally runs Ruff, mypy, pytest, coverage, and secret-pattern checks on 
 
 ## Current boundaries
 
-- Top-level deployments are detected. Internal `CREATE`/`CREATE2` coverage requires traces or an
-  indexed data source and is planned separately.
-- Verification may lag immediately after deployment; a later enrichment worker is on the roadmap.
+- Top-level deployments are detected globally. Trace-backed internal `CREATE`/`CREATE2` discovery
+  is opt-in and limited to transactions targeting explicitly watched contracts.
+- Trace availability, cost, and retention depend on the RPC provider and plan.
+- Scheduled re-enrichment is bounded; its cadence must be sized for the provider quota.
 - Priority is a triage score, not a vulnerability verdict or proof of malicious activity.
 - Pending visibility depends on the selected provider and network.
+- The evidence graph links on-chain and operator-supplied scope facts; it is not personal identity
+  attribution.
 - SQLite is appropriate for a single-node deployment. Horizontal workers require PostgreSQL and a
   queue.
 - No automated asset movement, exploit replication, or transaction competition is implemented.
@@ -240,5 +276,9 @@ Copyright © 2026 Volodymyr Stetsenko. All rights reserved. See [LICENSE](LICENS
 - [Geth real-time subscriptions](https://geth.ethereum.org/docs/interacting-with-geth/rpc/pubsub)
 - [Alchemy pending transaction subscriptions](https://www.alchemy.com/docs/reference/alchemy-pendingtransactions)
 - [Alchemy WebSocket best practices](https://www.alchemy.com/docs/reference/best-practices-for-using-websockets-in-web3)
+- [Alchemy Debug API](https://www.alchemy.com/docs/reference/debug-api-quickstart)
+- [Geth built-in tracers](https://geth.ethereum.org/docs/developers/evm-tracing/built-in-tracers)
 - [Etherscan API V2 introduction](https://docs.etherscan.io/introduction)
+- [Solidity contract metadata](https://docs.soliditylang.org/en/latest/metadata.html)
+- [ERC-1967 proxy storage slots](https://eips.ethereum.org/EIPS/eip-1967)
 - [CPS Computer Misuse Act guidance](https://www.cps.gov.uk/prosecution-guidance/computer-misuse-act)
