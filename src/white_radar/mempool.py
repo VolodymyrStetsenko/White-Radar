@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from white_radar.models import (
     stable_event_id,
     utc_now,
 )
+from white_radar.policy import PolicyBook, assess_pending, load_policy_book
 from white_radar.rpc import JsonRpcClient, hex_to_int
 from white_radar.scoring import score_pending
 from white_radar.storage import RadarStore
@@ -87,6 +89,7 @@ async def watch_pending_transactions(
     subscription_type, subscription_request = pending_subscription_request(
         chain, ws_url, watched_addresses
     )
+    policy_book = load_policy_book(settings.app.policy_path)
 
     from websockets.asyncio.client import connect
 
@@ -120,26 +123,84 @@ async def watch_pending_transactions(
                         subscription_type=subscription_type,
                     ),
                 )
+                store.record_heartbeat(
+                    service_name="pending_observer",
+                    chain_id=chain.chain_id,
+                    details={
+                        "chain": chain.name,
+                        "subscription_type": subscription_type,
+                        "watched_contracts": len(watched_addresses),
+                    },
+                )
                 await _flush_alerts(chain=chain, store=store, notifier=notifier)
                 backoff = 1
-                async for raw_message in websocket:
-                    await _handle_message(
-                        raw_message,
-                        rpc=rpc,
-                        chain=chain,
-                        watchlist=watchlist,
+                heartbeat = asyncio.create_task(
+                    _heartbeat_loop(
                         store=store,
-                        notifier=notifier,
+                        chain=chain,
                         subscription_type=subscription_type,
+                        watched_contracts=len(watched_addresses),
                     )
+                )
+                try:
+                    async for raw_message in websocket:
+                        await _handle_message(
+                            raw_message,
+                            rpc=rpc,
+                            chain=chain,
+                            watchlist=watchlist,
+                            store=store,
+                            notifier=notifier,
+                            subscription_type=subscription_type,
+                            policy_book=policy_book,
+                            incident_minimum_score=settings.app.incident_minimum_score,
+                            incident_sla_minutes=settings.app.incident_sla_minutes,
+                        )
+                finally:
+                    heartbeat.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await heartbeat
         except asyncio.CancelledError:
+            store.record_heartbeat(
+                service_name="pending_observer",
+                chain_id=chain.chain_id,
+                status="stopped",
+                details={"chain": chain.name},
+            )
             raise
-        except Exception:
-            LOGGER.exception(
+        except Exception as exc:
+            store.record_heartbeat(
+                service_name="pending_observer",
+                chain_id=chain.chain_id,
+                status="degraded",
+                details={"chain": chain.name, "retry_seconds": backoff},
+                last_error=type(exc).__name__,
+            )
+            LOGGER.error(
                 "pending stream disconnected", extra=log_context(chain=chain.name, retry=backoff)
             )
             await asyncio.sleep(backoff)
             backoff = min(30, backoff * 2)
+
+
+async def _heartbeat_loop(
+    *,
+    store: RadarStore,
+    chain: ChainConfig,
+    subscription_type: str,
+    watched_contracts: int,
+) -> None:
+    while True:
+        store.record_heartbeat(
+            service_name="pending_observer",
+            chain_id=chain.chain_id,
+            details={
+                "chain": chain.name,
+                "subscription_type": subscription_type,
+                "watched_contracts": watched_contracts,
+            },
+        )
+        await asyncio.sleep(30)
 
 
 async def _handle_message(
@@ -151,6 +212,9 @@ async def _handle_message(
     store: RadarStore,
     notifier: TelegramNotifier,
     subscription_type: str = "newPendingTransactions",
+    policy_book: PolicyBook | None = None,
+    incident_minimum_score: int = 70,
+    incident_sla_minutes: int = 30,
 ) -> None:
     try:
         message = json.loads(raw_message)
@@ -175,10 +239,27 @@ async def _handle_message(
     calldata = str(transaction.get("input") or "0x")
     selector = calldata[:10].lower() if len(calldata) >= 10 else "0x"
     native_value = hex_to_int(str(transaction.get("value") or "0x0"))
+    sender = str(transaction.get("from") or "").lower() or None
+    policy = (policy_book or PolicyBook.empty()).contract(chain.chain_id, destination)
+    assessment = (
+        assess_pending(
+            policy,
+            sender=sender,
+            selector=selector,
+            native_value_wei=native_value,
+        )
+        if policy
+        else None
+    )
+    policy_critical = bool(policy and selector in policy.critical_selectors)
     score = score_pending(
         protocol=watched.protocol,
-        critical_selector=selector in watched.critical_selectors,
+        critical_selector=selector in watched.critical_selectors or policy_critical,
         native_value_wei=native_value,
+    )
+    final_score = min(100, score.score + (assessment.score_delta if assessment else 0))
+    reasons = score.reasons + (
+        tuple(finding.reason for finding in assessment.findings) if assessment else ()
     )
     event = RadarEvent(
         event_id=stable_event_id("pending_watch", chain.chain_id, tx_hash),
@@ -188,20 +269,23 @@ async def _handle_message(
         summary=f"Pending transaction targets {watched.protocol} ({watched.role}).",
         chain=chain.name,
         chain_id=chain.chain_id,
-        score=score.score,
-        severity=severity_for_score(score.score),
-        confidence=score.confidence,
-        reasons=score.reasons,
+        score=final_score,
+        severity=severity_for_score(final_score),
+        confidence=min(
+            0.98,
+            score.confidence + (0.05 if assessment and assessment.findings else 0),
+        ),
+        reasons=reasons,
         recommended_action=score.recommended_action,
         subject_address=destination,
-        deployer_address=str(transaction.get("from") or "").lower() or None,
+        deployer_address=sender,
         tx_hash=tx_hash.lower(),
         evidence={"transaction": f"{chain.explorer_url}/tx/{tx_hash}"},
         metadata={
             "protocol": watched.protocol,
             "role": watched.role,
             "selector": selector,
-            "critical_selector": selector in watched.critical_selectors,
+            "critical_selector": selector in watched.critical_selectors or policy_critical,
             "native_value_wei": native_value,
             "calldata_size_bytes": max(0, (len(calldata.removeprefix("0x")) // 2)),
             "gas": hex_to_int(str(transaction.get("gas") or "0x0")),
@@ -212,10 +296,26 @@ async def _handle_message(
             "contact_uri": watched.contact_uri,
             "verification_source": "provider mempool observation",
             "subscription_type": subscription_type,
+            "policy_configured": policy is not None,
+            "policy_baseline_match": assessment.baseline_match if assessment else None,
+            "policy_findings": (
+                [finding.to_dict() for finding in assessment.findings] if assessment else []
+            ),
+            "policy_sha256": policy_book.source_sha256 if policy and policy_book else None,
         },
     )
     if not store.add_event(event):
         return
+    store.open_incident(
+        event,
+        minimum_score=incident_minimum_score,
+        sla_minutes=(
+            policy.incident_sla_minutes
+            if policy and policy.incident_sla_minutes is not None
+            else incident_sla_minutes
+        ),
+        protocol=watched.protocol,
+    )
     protocol_node = store.upsert_identity_node(
         chain_id=chain.chain_id,
         kind="protocol",

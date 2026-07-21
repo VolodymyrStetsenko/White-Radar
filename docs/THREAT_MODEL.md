@@ -26,6 +26,9 @@
 | False bytecode-family inference | Exact hash separated from heuristic SimHash; evidence retained | Similarity is not common ownership |
 | Stale explorer or proxy metadata | Bounded scheduled re-enrichment and drift cases | Refresh cadence and third-party lag |
 | Graph over-attribution | Typed evidence edges and explicit non-attribution policy | Human interpretation error |
+| Misconfigured policy baseline | Strict parsing, file digest, explainable rules, human review | Stale owner-supplied data |
+| Silent process failure | Periodic heartbeats, stale threshold, non-zero health check | Host outage needs external monitoring |
+| Incident status tampering | Controlled state machine and append-only transition records | Local database administrator remains trusted |
 
 ## Non-goals
 
@@ -37,6 +40,7 @@ White Radar does not claim to:
 - guarantee real-time delivery;
 - authorize security research;
 - execute a rescue or recover assets.
+- infer malicious intent solely from a policy deviation.
 
 ## Security review gates
 

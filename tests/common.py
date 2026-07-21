@@ -27,9 +27,13 @@ def settings_for(root: Path, *, telegram_enabled: bool = False) -> Settings:
         app=AppConfig(
             database_path=root / "radar.sqlite3",
             watchlist_path=root / "watchlist.toml",
+            policy_path=root / "policies.toml",
             poll_interval_seconds=20,
             request_timeout_seconds=2,
             request_retries=1,
+            incident_minimum_score=70,
+            incident_sla_minutes=30,
+            heartbeat_stale_after_seconds=120,
             log_level="INFO",
             dry_run=True,
         ),

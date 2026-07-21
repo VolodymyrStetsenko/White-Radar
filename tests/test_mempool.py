@@ -16,6 +16,7 @@ from white_radar.mempool import (
     watch_pending_transactions,
 )
 from white_radar.models import ContractWatch
+from white_radar.policy import PolicyBook, ProtocolPolicy
 from white_radar.storage import RadarStore
 from white_radar.telegram import TelegramNotifier
 
@@ -141,6 +142,59 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
             event = store.recent_events(1)[0]
             self.assertEqual(event.tx_hash, transaction["hash"])
             self.assertEqual(event.metadata["subscription_type"], "alchemy_pendingTransactions")
+
+    async def test_applies_protocol_policy_and_opens_incident(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = settings_for(root)
+            store = RadarStore(settings.app.database_path)
+            store.initialize()
+            watchlist = Watchlist(
+                (
+                    ContractWatch(
+                        chain_id=1,
+                        address=WATCHED_ADDRESS,
+                        protocol="Example",
+                    ),
+                ),
+                (),
+            )
+            policy_book = PolicyBook(
+                (
+                    ProtocolPolicy(
+                        chain_id=1,
+                        address=WATCHED_ADDRESS,
+                        protocol="Example",
+                        authorized_senders=frozenset({"0x" + "44" * 20}),
+                        allowed_selectors=frozenset({"0x87654321"}),
+                        critical_selectors=frozenset(),
+                        max_native_value_wei=0,
+                        incident_sla_minutes=10,
+                    ),
+                ),
+                "a" * 64,
+            )
+            transaction = {
+                "hash": "0x" + "cd" * 32,
+                "from": "0x" + "22" * 20,
+                "to": WATCHED_ADDRESS,
+                "input": "0x12345678",
+                "value": "0x1",
+            }
+            await _handle_message(
+                json.dumps({"params": {"result": transaction}}),
+                rpc=FakePendingRpc(None),  # type: ignore[arg-type]
+                chain=ETHEREUM,
+                watchlist=watchlist,
+                store=store,
+                notifier=TelegramNotifier(settings.telegram, True, 1, 1),
+                policy_book=policy_book,
+            )
+            event = store.recent_events(1)[0]
+            self.assertEqual(event.score, 100)
+            self.assertFalse(event.metadata["policy_baseline_match"])
+            self.assertEqual(len(event.metadata["policy_findings"]), 3)
+            self.assertIsNotNone(store.incident_for_event(event.event_id))
 
     async def test_ignores_invalid_unresolved_and_unwatched_messages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

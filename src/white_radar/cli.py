@@ -22,8 +22,9 @@ from white_radar.config import (
 )
 from white_radar.logging import configure_logging, log_context
 from white_radar.mempool import watch_pending_transactions
-from white_radar.models import ChainConfig, RadarEvent
+from white_radar.models import ChainConfig, IncidentStatus, RadarEvent
 from white_radar.monitor import ChainScanner
+from white_radar.policy import load_policy_book
 from white_radar.reporting import render_digest, render_incident_report
 from white_radar.rpc import JsonRpcClient
 from white_radar.storage import RadarStore
@@ -111,6 +112,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Send to configured Telegram; printing is the safe default.",
     )
+
+    incidents = subparsers.add_parser(
+        "incidents", help="List incident cases and acknowledgement deadlines."
+    )
+    incidents.add_argument("--status", choices=[status.value for status in IncidentStatus])
+    incidents.add_argument("--limit", type=int, default=50)
+
+    transition = subparsers.add_parser(
+        "incident-transition", help="Apply an audited incident workflow transition."
+    )
+    transition.add_argument("--incident-id", required=True)
+    transition.add_argument(
+        "--status",
+        required=True,
+        choices=[status.value for status in IncidentStatus],
+    )
+    transition.add_argument("--actor", required=True, help="Operator identity recorded in history.")
+    transition.add_argument("--note", default="", help="Short evidence-based transition note.")
+
+    health = subparsers.add_parser(
+        "health", help="Check scanner heartbeats and return non-zero for stale services."
+    )
+    health.add_argument("--stale-after", type=int, help="Override the configured stale threshold.")
     return parser
 
 
@@ -147,12 +171,14 @@ def cmd_init(config_path: str) -> int:
     package_root = Path(__file__).resolve().parents[2]
     example_config = package_root / "config.example.toml"
     example_watchlist = package_root / "watchlist.example.toml"
+    example_policies = package_root / "policies.example.toml"
     env_example = package_root / ".env.example"
     root.mkdir(parents=True, exist_ok=True)
     created: list[str] = []
     for source, target in (
         (example_config, destination),
         (example_watchlist, root / "watchlist.toml"),
+        (example_policies, root / "policies.toml"),
         (env_example, root / ".env"),
     ):
         if target.exists():
@@ -174,6 +200,18 @@ def cmd_doctor(settings: Settings, watchlist: Watchlist, *, online: bool) -> int
             "check": "enabled_chains",
             "ok": bool(enabled),
             "detail": [chain.name for chain in enabled],
+        }
+    )
+    policy_book = load_policy_book(settings.app.policy_path)
+    checks.append(
+        {
+            "check": "policy_pack",
+            "ok": True,
+            "detail": {
+                "path": str(settings.app.policy_path),
+                "policies": len(policy_book.policies),
+                "sha256": policy_book.source_sha256,
+            },
         }
     )
     checks.append(
@@ -247,8 +285,21 @@ def _scan_once(
                 store=store,
                 notifier=notifier,
             )
-            results.append(scanner.scan().to_dict())
+            result = scanner.scan().to_dict()
+            store.record_heartbeat(
+                service_name="confirmed_scanner",
+                chain_id=chain.chain_id,
+                details={"chain": chain.name, "cycle": result},
+            )
+            results.append(result)
         except Exception as exc:
+            store.record_heartbeat(
+                service_name="confirmed_scanner",
+                chain_id=chain.chain_id,
+                status="degraded",
+                details={"chain": chain.name},
+                last_error=type(exc).__name__,
+            )
             LOGGER.exception("chain scan failed", extra=log_context(chain=chain.name))
             results.append({"chain": chain.name, "error": str(exc)})
     return results
@@ -323,7 +374,8 @@ def cmd_report(
         if event.subject_address
         else None
     )
-    report = render_incident_report(event, chain, graph=graph)
+    incident = store.incident_for_event(event.event_id)
+    report = render_incident_report(event, chain, graph=graph, incident=incident)
     if output:
         destination = output.expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -344,14 +396,85 @@ def cmd_digest(
 ) -> int:
     bounded_hours = max(1, min(24 * 31, hours))
     events = store.events_since(hours=bounded_hours)
+    incidents = store.list_incidents(limit=500)
     chains = {chain.name: chain for chain in settings.chains}
-    digest = render_digest(events, chains, hours=bounded_hours)
+    digest = render_digest(
+        events,
+        chains,
+        hours=bounded_hours,
+        incidents=incidents,
+        overdue_incident_ids={item.incident_id for item in store.overdue_incidents(limit=500)},
+    )
     print(digest)
     if send and not notifier.send_digest(digest):
         raise RuntimeError(
             "Digest was not sent. Enable Telegram and set WHITE_RADAR_DRY_RUN=false first."
         )
     return 0
+
+
+def cmd_incidents(store: RadarStore, *, status: str | None, limit: int) -> int:
+    selected = IncidentStatus(status) if status else None
+    cases = store.list_incidents(status=selected, limit=limit)
+    print(json.dumps([incident.to_dict() for incident in cases], indent=2))
+    return 0
+
+
+def cmd_incident_transition(
+    store: RadarStore,
+    *,
+    incident_id: str,
+    status: str,
+    actor: str,
+    note: str,
+) -> int:
+    incident = store.transition_incident(
+        incident_id,
+        IncidentStatus(status),
+        actor=actor,
+        note=note,
+    )
+    print(
+        json.dumps(
+            {
+                "incident": incident.to_dict(),
+                "history": store.incident_history(incident.incident_id),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _expected_health_services(settings: Settings, watchlist: Watchlist) -> set[tuple[str, int]]:
+    expected = {("confirmed_scanner", chain.chain_id) for chain in settings.enabled_chains()}
+    for chain in settings.enabled_chains():
+        if (
+            chain.rpc_ws_env
+            and os.getenv(chain.rpc_ws_env, "").strip()
+            and watchlist.addresses_for_chain(chain.chain_id)
+        ):
+            expected.add(("pending_observer", chain.chain_id))
+    return expected
+
+
+def cmd_health(
+    settings: Settings,
+    watchlist: Watchlist,
+    store: RadarStore,
+    *,
+    stale_after: int | None,
+) -> int:
+    snapshot = store.health_snapshot(
+        stale_after_seconds=(
+            max(30, stale_after)
+            if stale_after is not None
+            else settings.app.heartbeat_stale_after_seconds
+        ),
+        expected_services=_expected_health_services(settings, watchlist),
+    )
+    print(json.dumps(snapshot, indent=2))
+    return 0 if snapshot["ok"] else 1
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -394,9 +517,24 @@ def main(argv: list[str] | None = None) -> None:
                 store=store,
                 notifier=notifier,
             )
-            result = scanner.refresh_profiles(
-                limit=max(1, min(500, args.limit)),
-                min_age_minutes=max(0, args.min_age_minutes),
+            try:
+                result = scanner.refresh_profiles(
+                    limit=max(1, min(500, args.limit)),
+                    min_age_minutes=max(0, args.min_age_minutes),
+                )
+            except Exception as exc:
+                store.record_heartbeat(
+                    service_name="profile_refresh",
+                    chain_id=chain.chain_id,
+                    status="degraded",
+                    details={"chain": chain.name},
+                    last_error=type(exc).__name__,
+                )
+                raise
+            store.record_heartbeat(
+                service_name="profile_refresh",
+                chain_id=chain.chain_id,
+                details={"chain": chain.name, "cycle": result.to_dict()},
             )
             print(json.dumps(result.to_dict(), indent=2))
             code = 0
@@ -406,6 +544,11 @@ def main(argv: list[str] | None = None) -> None:
                     {
                         "counts": store.counts(),
                         "intelligence": store.intelligence_counts(),
+                        "incidents": store.incident_counts(),
+                        "health": store.health_snapshot(
+                            stale_after_seconds=settings.app.heartbeat_stale_after_seconds,
+                            expected_services=_expected_health_services(settings, watchlist),
+                        ),
                         "cursors": store.cursors(),
                     },
                     indent=2,
@@ -451,9 +594,26 @@ def main(argv: list[str] | None = None) -> None:
                 hours=args.hours,
                 send=args.send,
             )
+        elif args.command == "incidents":
+            code = cmd_incidents(store, status=args.status, limit=max(1, min(500, args.limit)))
+        elif args.command == "incident-transition":
+            code = cmd_incident_transition(
+                store,
+                incident_id=args.incident_id,
+                status=args.status,
+                actor=args.actor,
+                note=args.note,
+            )
+        elif args.command == "health":
+            code = cmd_health(
+                settings,
+                watchlist,
+                store,
+                stale_after=args.stale_after,
+            )
         else:
             parser.error(f"Unknown command: {args.command}")
-    except (ConfigurationError, RuntimeError) as exc:
+    except (ConfigurationError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
     raise SystemExit(code)

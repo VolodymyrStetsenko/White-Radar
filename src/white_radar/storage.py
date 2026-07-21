@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from white_radar.fingerprint import BytecodeFingerprint, simhash_similarity
-from white_radar.models import ContractMetadata, RadarEvent, utc_now
+from white_radar.models import (
+    ContractMetadata,
+    IncidentRecord,
+    IncidentStatus,
+    RadarEvent,
+    Severity,
+    stable_event_id,
+    utc_now,
+)
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -108,7 +116,92 @@ ON identity_edges (chain_id, source_node_id);
 
 CREATE INDEX IF NOT EXISTS idx_identity_edges_target
 ON identity_edges (chain_id, target_node_id);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    protocol TEXT,
+    owner TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    acknowledged_at TEXT,
+    closed_at TEXT,
+    disposition TEXT,
+    FOREIGN KEY (event_id) REFERENCES events(event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_incidents_status_due
+ON incidents (status, due_at);
+
+CREATE TABLE IF NOT EXISTS incident_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id TEXT NOT NULL,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    note TEXT,
+    changed_at TEXT NOT NULL,
+    FOREIGN KEY (incident_id) REFERENCES incidents(incident_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_history_case
+ON incident_history (incident_id, changed_at);
+
+CREATE TABLE IF NOT EXISTS service_heartbeats (
+    service_name TEXT NOT NULL,
+    chain_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    last_error TEXT,
+    PRIMARY KEY (service_name, chain_id)
+);
 """
+
+OPEN_INCIDENT_STATUSES = frozenset(
+    {
+        IncidentStatus.NEW,
+        IncidentStatus.ACKNOWLEDGED,
+        IncidentStatus.INVESTIGATING,
+        IncidentStatus.MONITORING,
+    }
+)
+INCIDENT_TRANSITIONS: dict[IncidentStatus, frozenset[IncidentStatus]] = {
+    IncidentStatus.NEW: frozenset(
+        {
+            IncidentStatus.ACKNOWLEDGED,
+            IncidentStatus.INVESTIGATING,
+            IncidentStatus.FALSE_POSITIVE,
+        }
+    ),
+    IncidentStatus.ACKNOWLEDGED: frozenset(
+        {
+            IncidentStatus.INVESTIGATING,
+            IncidentStatus.MONITORING,
+            IncidentStatus.RESOLVED,
+            IncidentStatus.FALSE_POSITIVE,
+        }
+    ),
+    IncidentStatus.INVESTIGATING: frozenset(
+        {
+            IncidentStatus.MONITORING,
+            IncidentStatus.RESOLVED,
+            IncidentStatus.FALSE_POSITIVE,
+        }
+    ),
+    IncidentStatus.MONITORING: frozenset(
+        {
+            IncidentStatus.INVESTIGATING,
+            IncidentStatus.RESOLVED,
+            IncidentStatus.FALSE_POSITIVE,
+        }
+    ),
+    IncidentStatus.RESOLVED: frozenset(),
+    IncidentStatus.FALSE_POSITIVE: frozenset(),
+}
 
 
 class RadarStore:
@@ -226,6 +319,332 @@ class RadarStore:
                 ),
             )
             return cursor.rowcount == 1
+
+    @staticmethod
+    def _incident_from_row(row: sqlite3.Row) -> IncidentRecord:
+        return IncidentRecord(
+            incident_id=str(row["incident_id"]),
+            event_id=str(row["event_id"]),
+            status=IncidentStatus(str(row["status"])),
+            severity=Severity(str(row["severity"])),
+            protocol=str(row["protocol"]) if row["protocol"] is not None else None,
+            owner=str(row["owner"]) if row["owner"] is not None else None,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            due_at=str(row["due_at"]),
+            acknowledged_at=(
+                str(row["acknowledged_at"]) if row["acknowledged_at"] is not None else None
+            ),
+            closed_at=str(row["closed_at"]) if row["closed_at"] is not None else None,
+            disposition=str(row["disposition"]) if row["disposition"] is not None else None,
+        )
+
+    def open_incident(
+        self,
+        event: RadarEvent,
+        *,
+        minimum_score: int,
+        sla_minutes: int,
+        protocol: str | None = None,
+    ) -> IncidentRecord | None:
+        """Idempotently promote a high-priority event into an auditable incident."""
+
+        if event.score < max(0, min(100, minimum_score)):
+            return None
+        try:
+            observed = dt.datetime.fromisoformat(event.observed_at)
+        except ValueError:
+            observed = dt.datetime.now(dt.UTC)
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=dt.UTC)
+        created_at = observed.astimezone(dt.UTC).isoformat(timespec="seconds")
+        due_at = (
+            (observed + dt.timedelta(minutes=max(1, sla_minutes)))
+            .astimezone(dt.UTC)
+            .isoformat(timespec="seconds")
+        )
+        incident_id = stable_event_id("incident", event.event_id)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO incidents(
+                    incident_id, event_id, status, severity, protocol, created_at,
+                    updated_at, due_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    incident_id,
+                    event.event_id,
+                    IncidentStatus.NEW.value,
+                    event.severity.value,
+                    protocol,
+                    created_at,
+                    created_at,
+                    due_at,
+                ),
+            )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    """
+                    INSERT INTO incident_history(
+                        incident_id, from_status, to_status, actor, note, changed_at
+                    ) VALUES (?, NULL, ?, ?, ?, ?)
+                    """,
+                    (
+                        incident_id,
+                        IncidentStatus.NEW.value,
+                        "white-radar",
+                        "Automatically opened from an explainable priority threshold.",
+                        created_at,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)
+            ).fetchone()
+        return self._incident_from_row(row) if row else None
+
+    def incident_for_event(self, event_id: str) -> IncidentRecord | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM incidents WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return self._incident_from_row(row) if row else None
+
+    def get_incident(self, incident_id: str) -> IncidentRecord | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)
+            ).fetchone()
+        return self._incident_from_row(row) if row else None
+
+    def list_incidents(
+        self, *, status: IncidentStatus | None = None, limit: int = 50
+    ) -> list[IncidentRecord]:
+        query = "SELECT * FROM incidents"
+        parameters: list[object] = []
+        if status is not None:
+            query += " WHERE status = ?"
+            parameters.append(status.value)
+        query += " ORDER BY due_at ASC, created_at DESC LIMIT ?"
+        parameters.append(max(1, min(500, limit)))
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [self._incident_from_row(row) for row in rows]
+
+    def transition_incident(
+        self,
+        incident_id: str,
+        status: IncidentStatus,
+        *,
+        actor: str,
+        note: str = "",
+    ) -> IncidentRecord:
+        normalized_actor = " ".join(actor.split())[:100]
+        normalized_note = " ".join(note.split())[:2000]
+        if not normalized_actor:
+            raise ValueError("An incident transition requires an actor")
+        now = utc_now()
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Unknown incident: {incident_id}")
+            previous = IncidentStatus(str(row["status"]))
+            if status not in INCIDENT_TRANSITIONS[previous]:
+                raise ValueError(f"Invalid incident transition: {previous.value} -> {status.value}")
+            acknowledged_at = (
+                now
+                if status
+                in {
+                    IncidentStatus.ACKNOWLEDGED,
+                    IncidentStatus.INVESTIGATING,
+                    IncidentStatus.MONITORING,
+                }
+                and row["acknowledged_at"] is None
+                else row["acknowledged_at"]
+            )
+            closed_at = (
+                now if status in {IncidentStatus.RESOLVED, IncidentStatus.FALSE_POSITIVE} else None
+            )
+            disposition = normalized_note if closed_at and normalized_note else row["disposition"]
+            owner = row["owner"] or normalized_actor
+            connection.execute(
+                """
+                UPDATE incidents
+                SET status = ?, owner = ?, updated_at = ?, acknowledged_at = ?,
+                    closed_at = ?, disposition = ?
+                WHERE incident_id = ?
+                """,
+                (
+                    status.value,
+                    owner,
+                    now,
+                    acknowledged_at,
+                    closed_at,
+                    disposition,
+                    incident_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO incident_history(
+                    incident_id, from_status, to_status, actor, note, changed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    incident_id,
+                    previous.value,
+                    status.value,
+                    normalized_actor,
+                    normalized_note or None,
+                    now,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)
+            ).fetchone()
+        if not updated:
+            raise RuntimeError("Incident disappeared during transition")
+        return self._incident_from_row(updated)
+
+    def incident_history(self, incident_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT from_status, to_status, actor, note, changed_at
+                FROM incident_history WHERE incident_id = ?
+                ORDER BY history_id ASC
+                """,
+                (incident_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def incident_counts(self) -> dict[str, int]:
+        counts = {status.value: 0 for status in IncidentStatus}
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS total FROM incidents GROUP BY status"
+            ).fetchall()
+        for row in rows:
+            counts[str(row["status"])] = int(row["total"])
+        counts["open"] = sum(counts[status.value] for status in OPEN_INCIDENT_STATUSES)
+        return counts
+
+    def overdue_incidents(self, *, limit: int = 100) -> list[IncidentRecord]:
+        placeholders = ",".join("?" for _ in OPEN_INCIDENT_STATUSES)
+        ordered_statuses = sorted(OPEN_INCIDENT_STATUSES, key=lambda item: item.value)
+        parameters: list[object] = [
+            *(status.value for status in ordered_statuses),
+            utc_now(),
+            max(1, min(500, limit)),
+        ]
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM incidents
+                WHERE status IN ({placeholders}) AND due_at < ?
+                ORDER BY due_at ASC LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+        return [self._incident_from_row(row) for row in rows]
+
+    def record_heartbeat(
+        self,
+        *,
+        service_name: str,
+        chain_id: int,
+        status: str = "ok",
+        details: dict[str, Any] | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        normalized_service = " ".join(service_name.split())[:100]
+        normalized_status = status.strip().lower()[:30]
+        if not normalized_service or not normalized_status:
+            raise ValueError("Heartbeat service and status are required")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO service_heartbeats(
+                    service_name, chain_id, status, last_seen_at, details_json, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(service_name, chain_id) DO UPDATE SET
+                    status = excluded.status,
+                    last_seen_at = excluded.last_seen_at,
+                    details_json = excluded.details_json,
+                    last_error = excluded.last_error
+                """,
+                (
+                    normalized_service,
+                    chain_id,
+                    normalized_status,
+                    utc_now(),
+                    json.dumps(details or {}, sort_keys=True, separators=(",", ":")),
+                    (last_error or "")[:200] or None,
+                ),
+            )
+
+    def health_snapshot(
+        self,
+        *,
+        stale_after_seconds: int,
+        expected_services: set[tuple[str, int]] | None = None,
+    ) -> dict[str, Any]:
+        now = dt.datetime.now(dt.UTC)
+        threshold = max(30, stale_after_seconds)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT service_name, chain_id, status, last_seen_at, details_json, last_error
+                FROM service_heartbeats ORDER BY service_name, chain_id
+                """
+            ).fetchall()
+        services: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                seen = dt.datetime.fromisoformat(str(row["last_seen_at"]))
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=dt.UTC)
+                age_seconds = max(0, int((now - seen.astimezone(dt.UTC)).total_seconds()))
+            except ValueError:
+                age_seconds = threshold + 1
+            stale = age_seconds > threshold
+            status = str(row["status"])
+            services.append(
+                {
+                    "service_name": str(row["service_name"]),
+                    "chain_id": int(row["chain_id"]),
+                    "status": status,
+                    "last_seen_at": str(row["last_seen_at"]),
+                    "age_seconds": age_seconds,
+                    "stale": stale,
+                    "healthy": status == "ok" and not stale,
+                    "details": json.loads(str(row["details_json"])),
+                    "last_error": row["last_error"],
+                }
+            )
+        observed = {(str(item["service_name"]), int(item["chain_id"])) for item in services}
+        for service_name, chain_id in sorted((expected_services or set()) - observed):
+            services.append(
+                {
+                    "service_name": service_name,
+                    "chain_id": chain_id,
+                    "status": "missing",
+                    "last_seen_at": None,
+                    "age_seconds": None,
+                    "stale": True,
+                    "healthy": False,
+                    "details": {},
+                    "last_error": "No heartbeat has been recorded.",
+                }
+            )
+        services.sort(key=lambda item: (str(item["service_name"]), int(item["chain_id"])))
+        return {
+            "ok": bool(services) and all(bool(item["healthy"]) for item in services),
+            "stale_after_seconds": threshold,
+            "services": services,
+        }
 
     def upsert_contract_profile(
         self,

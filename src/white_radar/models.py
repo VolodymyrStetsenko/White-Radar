@@ -16,6 +16,15 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+class IncidentStatus(StrEnum):
+    NEW = "new"
+    ACKNOWLEDGED = "acknowledged"
+    INVESTIGATING = "investigating"
+    MONITORING = "monitoring"
+    RESOLVED = "resolved"
+    FALSE_POSITIVE = "false_positive"
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
 
@@ -135,3 +144,25 @@ class RadarEvent:
             evidence=dict(value.get("evidence", {})),
             metadata=dict(value.get("metadata", {})),
         )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class IncidentRecord:
+    incident_id: str
+    event_id: str
+    status: IncidentStatus
+    severity: Severity
+    protocol: str | None
+    owner: str | None
+    created_at: str
+    updated_at: str
+    due_at: str
+    acknowledged_at: str | None = None
+    closed_at: str | None = None
+    disposition: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        value = dataclasses.asdict(self)
+        value["status"] = self.status.value
+        value["severity"] = self.severity.value
+        return value

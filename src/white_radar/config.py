@@ -21,9 +21,13 @@ class ConfigurationError(ValueError):
 class AppConfig:
     database_path: Path
     watchlist_path: Path
+    policy_path: Path
     poll_interval_seconds: int
     request_timeout_seconds: int
     request_retries: int
+    incident_minimum_score: int
+    incident_sla_minutes: int
+    heartbeat_stale_after_seconds: int
     log_level: str
     dry_run: bool
 
@@ -148,12 +152,27 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     if not watchlist_path.is_absolute():
         watchlist_path = root / watchlist_path
 
+    policy_path = Path(
+        os.getenv(
+            "WHITE_RADAR_POLICIES",
+            str(app_data.get("policy_path", "policies.toml")),
+        )
+    )
+    if not policy_path.is_absolute():
+        policy_path = root / policy_path
+
     app = AppConfig(
         database_path=database_path,
         watchlist_path=watchlist_path,
+        policy_path=policy_path,
         poll_interval_seconds=max(5, int(app_data.get("poll_interval_seconds", 20))),
         request_timeout_seconds=max(3, int(app_data.get("request_timeout_seconds", 20))),
         request_retries=max(1, min(8, int(app_data.get("request_retries", 3)))),
+        incident_minimum_score=max(0, min(100, int(app_data.get("incident_minimum_score", 70)))),
+        incident_sla_minutes=max(1, int(app_data.get("incident_sla_minutes", 30))),
+        heartbeat_stale_after_seconds=max(
+            30, int(app_data.get("heartbeat_stale_after_seconds", 120))
+        ),
         log_level=str(app_data.get("log_level", "INFO")).upper(),
         dry_run=_as_bool(os.getenv("WHITE_RADAR_DRY_RUN"), bool(app_data.get("dry_run", True))),
     )

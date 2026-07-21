@@ -1,9 +1,13 @@
 [app]
 database_path = "data/white-radar.sqlite3"
 watchlist_path = "watchlist.toml"
+policy_path = "policies.toml"
 poll_interval_seconds = 20
 request_timeout_seconds = 20
 request_retries = 3
+incident_minimum_score = 70
+incident_sla_minutes = 30
+heartbeat_stale_after_seconds = 120
 log_level = "INFO"
 dry_run = true
 

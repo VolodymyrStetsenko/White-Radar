@@ -43,9 +43,16 @@ def render_event(event: RadarEvent, chain: ChainConfig) -> str:
     if event.subject_address:
         lines.append(f"<b>Contract:</b> <code>{_safe(event.subject_address)}</code>")
     if event.deployer_address:
-        lines.append(f"<b>Deployer:</b> <code>{_safe(event.deployer_address)}</code>")
+        actor_label = "Sender" if event.event_type == "pending_watch" else "Deployer"
+        lines.append(f"<b>{actor_label}:</b> <code>{_safe(event.deployer_address)}</code>")
+    if event.tx_hash:
+        lines.append(f"<b>Transaction:</b> <code>{_safe(event.tx_hash)}</code>")
 
     metadata = event.metadata
+    if metadata.get("protocol"):
+        lines.append(f"<b>Protocol:</b> {_safe(metadata['protocol'])}")
+    if metadata.get("role"):
+        lines.append(f"<b>Role:</b> {_safe(metadata['role'])}")
     name = metadata.get("contract_name")
     if name:
         lines.append(f"<b>Name:</b> {_safe(name)}")
@@ -61,6 +68,22 @@ def render_event(event: RadarEvent, chain: ChainConfig) -> str:
         lines.append("<b>Architecture:</b> EIP-1967 proxy")
         if metadata.get("implementation"):
             lines.append(f"<b>Implementation:</b> <code>{_safe(metadata['implementation'])}</code>")
+    if metadata.get("selector"):
+        lines.append(f"<b>Selector:</b> <code>{_safe(metadata['selector'])}</code>")
+    if metadata.get("native_value_wei") is not None:
+        lines.append(f"<b>Native value:</b> {_safe(metadata['native_value_wei'])} wei")
+    if metadata.get("policy_configured"):
+        baseline = "MATCH" if metadata.get("policy_baseline_match") else "REVIEW"
+        lines.append(f"<b>Policy baseline:</b> {_safe(baseline)}")
+        findings = metadata.get("policy_findings") or []
+        if findings:
+            codes = [
+                str(item.get("code"))
+                for item in findings
+                if isinstance(item, dict) and item.get("code")
+            ]
+            if codes:
+                lines.append(f"<b>Policy findings:</b> {_safe(', '.join(codes[:5]))}")
 
     lines.extend(["", "<b>Why this surfaced</b>"])
     lines.extend(f"• {_safe(reason)}" for reason in event.reasons[:5])
