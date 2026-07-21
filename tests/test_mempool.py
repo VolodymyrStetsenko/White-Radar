@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests.common import ETHEREUM, settings_for
+from white_radar.abi import DecodedCall
 from white_radar.config import Watchlist
 from white_radar.mempool import (
     _handle_message,
@@ -31,7 +32,86 @@ class FakePendingRpc:
         return self._transaction
 
 
+class AnalysisPendingRpc(FakePendingRpc):
+    def block_number(self) -> int:
+        return 100
+
+    def block(self, number: int, *, full_transactions: bool = False) -> dict[str, object]:
+        return {"hash": "0x" + "ab" * 32}
+
+    def eth_call(self, transaction: dict[str, object], block: str) -> str:
+        return "0x" + "01" * 32
+
+    def trace_call(self, transaction: dict[str, object], block: str) -> dict[str, object]:
+        return {
+            "type": "CALL",
+            "to": WATCHED_ADDRESS,
+            "calls": [{"type": "DELEGATECALL", "to": "0x" + "33" * 20}],
+        }
+
+
+class FakeAbiResolver:
+    def resolve(
+        self,
+        chain_id: int,
+        address: str,
+        calldata: str,
+        *,
+        fallback_signature: str | None = None,
+    ) -> DecodedCall:
+        return DecodedCall(
+            selector=calldata[:10],
+            signature="review(uint256)",
+            arguments={"caseId": 7},
+            source="Etherscan",
+            abi_sha256="a" * 64,
+        )
+
+
 class PendingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_enriches_selected_pending_case_with_abi_and_simulation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = settings_for(root)
+            store = RadarStore(settings.app.database_path)
+            store.initialize()
+            watchlist = Watchlist(
+                (
+                    ContractWatch(
+                        chain_id=1,
+                        address=WATCHED_ADDRESS,
+                        protocol="Example",
+                    ),
+                ),
+                (),
+            )
+            transaction = {
+                "hash": "0x" + "aa" * 32,
+                "from": "0x" + "22" * 20,
+                "to": WATCHED_ADDRESS,
+                "input": "0x12345678" + f"{7:064x}",
+                "value": "0x0",
+            }
+            await _handle_message(
+                json.dumps({"params": {"result": transaction}}),
+                rpc=AnalysisPendingRpc(None),  # type: ignore[arg-type]
+                chain=ETHEREUM,
+                watchlist=watchlist,
+                store=store,
+                notifier=TelegramNotifier(settings.telegram, True, 1, 1),
+                abi_resolver=FakeAbiResolver(),  # type: ignore[arg-type]
+                pending_simulation_enabled=True,
+                pending_simulation_minimum_score=0,
+                trace_call_enabled=True,
+            )
+            event = store.recent_events(1)[0]
+            self.assertEqual(event.metadata["function_signature"], "review(uint256)")
+            self.assertEqual(event.metadata["decoded_arguments"], {"caseId": 7})
+            simulation = event.metadata["simulation"]
+            self.assertEqual(simulation["status"], "succeeded")
+            self.assertEqual(simulation["trace"]["delegatecall_count"], 1)
+            self.assertNotIn("calldata", event.metadata)
+
     def test_builds_filtered_alchemy_or_standard_subscription(self) -> None:
         addresses = frozenset({WATCHED_ADDRESS})
         mode, request = pending_subscription_request(
@@ -98,7 +178,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0].metadata["selector"], "0x12345678")
             self.assertNotIn("calldata", events[0].metadata)
-            self.assertIn("Do not replay", events[0].recommended_action)
+            self.assertIn("state-pinned simulation", events[0].recommended_action)
             self.assertEqual(store.intelligence_counts()["identity_edges"], 2)
 
     async def test_accepts_filtered_full_transaction_without_rpc_lookup(self) -> None:
@@ -223,7 +303,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(store.counts()["events"], 0)
 
-    async def test_pending_stream_requires_ws_and_authorized_watchlist(self) -> None:
+    async def test_pending_stream_requires_ws_and_protocol_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             settings = settings_for(root)

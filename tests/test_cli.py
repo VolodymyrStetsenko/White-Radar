@@ -12,6 +12,7 @@ from unittest.mock import patch
 from tests.common import sample_event, settings_for
 from white_radar.cli import (
     _load_runtime,
+    _validated_address,
     build_parser,
     cmd_doctor,
     cmd_health,
@@ -21,14 +22,26 @@ from white_radar.cli import (
     cmd_preview,
     main,
 )
-from white_radar.config import Watchlist
+from white_radar.config import ConfigurationError, Watchlist
 from white_radar.storage import RadarStore
 
 
 class CliTests(unittest.TestCase):
+    def test_validates_contract_addresses_for_analysis_commands(self) -> None:
+        address = "0x" + "AB" * 20
+        self.assertEqual(_validated_address(address), address.lower())
+        with self.assertRaises(ConfigurationError):
+            _validated_address("0x1234")
+
     def test_parser_and_init_preserve_existing_files(self) -> None:
         parser = build_parser()
         self.assertEqual(parser.parse_args(["status"]).command, "status")
+        self.assertEqual(
+            parser.parse_args(
+                ["simulate", "--chain", "ethereum", "--tx-hash", "0x" + "11" * 32]
+            ).command,
+            "simulate",
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"

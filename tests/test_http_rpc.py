@@ -93,6 +93,8 @@ class RpcResponseTests(unittest.TestCase):
             "eth_getCode": "0x6000",
             "eth_getStorageAt": "0x00",
             "eth_getLogs": [{"address": "0x1"}],
+            "eth_call": "0x01",
+            "debug_traceCall": {"type": "CALL"},
         }
 
         def fake_request(_method: str, _url: str, **kwargs: object) -> object:
@@ -112,6 +114,26 @@ class RpcResponseTests(unittest.TestCase):
             self.assertEqual(rpc.code("0x1"), "0x6000")
             self.assertEqual(rpc.storage_at("0x1", "0x0"), "0x00")
             self.assertEqual(len(rpc.logs(from_block=1, to_block=2, topics=[])), 1)
+            self.assertEqual(rpc.eth_call({"to": "0x1"}, "0xa"), "0x01")
+            self.assertEqual(rpc.trace_call({"to": "0x1"}, "0xa"), {"type": "CALL"})
+
+    def test_fails_over_between_read_only_http_endpoints(self) -> None:
+        calls: list[str] = []
+
+        def fake_request(_method: str, url: str, **kwargs: object) -> object:
+            calls.append(url)
+            if len(calls) == 1:
+                raise HttpError("temporary transport failure")
+            payload = kwargs["payload"]
+            assert isinstance(payload, dict)
+            return {"jsonrpc": "2.0", "id": payload["id"], "result": "0x1"}
+
+        rpc = JsonRpcClient(("https://primary.invalid", "https://secondary.invalid"))
+        with patch("white_radar.rpc.request_json", side_effect=fake_request):
+            self.assertEqual(rpc.chain_id(), 1)
+        self.assertEqual(calls, ["https://primary.invalid", "https://secondary.invalid"])
+        self.assertEqual(rpc.active_endpoint_index, 1)
+        self.assertEqual(rpc.endpoint_count, 2)
 
     def test_rejects_bad_url_and_rpc_errors(self) -> None:
         with self.assertRaises(RpcError):

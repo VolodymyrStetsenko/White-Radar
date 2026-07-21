@@ -2,6 +2,18 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+- added ordered HTTP and WebSocket RPC fallback configuration;
+- added verified ABI catalogs, Ethereum selector derivation, and bounded static argument decoding;
+- added state-pinned transaction simulation with optional bounded call-graph tracing;
+- added EIP-1967/beacon/effective-implementation snapshots and UUPS compatibility checks;
+- added typed protocol invariants with transition-only violation and recovery events;
+- enriched pending, proxy-upgrade, Telegram, report, health, and status evidence;
+- added dedicated ABI, simulation, proxy, invariant, storage, and RPC failover tests;
+- rebuilt architecture, coverage, operations, policy, intelligence, Telegram, privacy, and threat
+  documentation around the integrated protocol-defense platform.
+
 ## 0.3.0 — 2026-07-21
 
 - added bounded per-protocol policy packs for sender, selector, native-value, and SLA baselines;

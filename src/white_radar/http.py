@@ -40,7 +40,7 @@ def request_json(
     body = None
     request_headers = {
         "Accept": "application/json",
-        "User-Agent": "white-radar/0.1",
+        "User-Agent": "white-radar",
         **(headers or {}),
     }
     if payload is not None:

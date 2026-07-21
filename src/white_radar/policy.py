@@ -12,6 +12,21 @@ from white_radar.config import ConfigurationError
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 SELECTOR_RE = re.compile(r"^0x[a-fA-F0-9]{8}$")
 MAX_POLICY_BYTES = 1_048_576
+MAX_CALLDATA_BYTES = 8_192
+INVARIANT_DECODERS = frozenset({"uint256", "int256", "address", "bool", "bytes32"})
+INVARIANT_OPERATORS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "zero", "nonzero"})
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProtocolInvariant:
+    name: str
+    target: str
+    call_data: str
+    decode_as: str
+    operator: str
+    expected: str | int | bool | None
+    score: int
+    alert_on_error: bool
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -24,6 +39,12 @@ class ProtocolPolicy:
     critical_selectors: frozenset[str]
     max_native_value_wei: int | None
     incident_sla_minutes: int | None
+    selector_labels: tuple[tuple[str, str], ...] = ()
+    invariants: tuple[ProtocolInvariant, ...] = ()
+
+    def selector_label(self, selector: str) -> str | None:
+        normalized = selector.lower()
+        return next((label for key, label in self.selector_labels if key == normalized), None)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -68,6 +89,9 @@ class PolicyBook:
             None,
         )
 
+    def for_chain(self, chain_id: int) -> tuple[ProtocolPolicy, ...]:
+        return tuple(policy for policy in self.policies if policy.chain_id == chain_id)
+
 
 def _address(value: object, field: str) -> str:
     normalized = str(value).lower()
@@ -85,6 +109,57 @@ def _selectors(values: object, field: str) -> frozenset[str]:
     return normalized
 
 
+def _call_data(value: object) -> str:
+    normalized = str(value).lower()
+    if not normalized.startswith("0x") or len(normalized) % 2:
+        raise ConfigurationError("Invariant call_data must be even-length hexadecimal data")
+    try:
+        raw = bytes.fromhex(normalized[2:])
+    except ValueError as exc:
+        raise ConfigurationError("Invariant call_data is not valid hexadecimal data") from exc
+    if len(raw) < 4 or len(raw) > MAX_CALLDATA_BYTES:
+        raise ConfigurationError(f"Invariant call_data must contain 4-{MAX_CALLDATA_BYTES} bytes")
+    return normalized
+
+
+def _invariants(values: object, *, default_target: str) -> tuple[ProtocolInvariant, ...]:
+    if not isinstance(values, list):
+        raise ConfigurationError("invariants must be a TOML array of tables")
+    invariants: list[ProtocolInvariant] = []
+    names: set[str] = set()
+    for item in values:
+        if not isinstance(item, dict):
+            raise ConfigurationError("Each invariant must be a TOML table")
+        name = str(item.get("name") or "").strip()
+        if not name or len(name) > 100:
+            raise ConfigurationError("Invariant name must contain 1-100 characters")
+        if name in names:
+            raise ConfigurationError(f"Duplicate invariant name: {name}")
+        names.add(name)
+        decode_as = str(item.get("decode_as", "uint256")).lower()
+        operator = str(item.get("operator", "eq")).lower()
+        if decode_as not in INVARIANT_DECODERS:
+            raise ConfigurationError(f"Unsupported invariant decoder: {decode_as}")
+        if operator not in INVARIANT_OPERATORS:
+            raise ConfigurationError(f"Unsupported invariant operator: {operator}")
+        expected = item.get("expected")
+        if operator not in {"zero", "nonzero"} and expected is None:
+            raise ConfigurationError(f"Invariant {name} requires expected")
+        invariants.append(
+            ProtocolInvariant(
+                name=name,
+                target=_address(item.get("target", default_target), "invariant target"),
+                call_data=_call_data(item.get("call_data", "")),
+                decode_as=decode_as,
+                operator=operator,
+                expected=expected,
+                score=max(0, min(100, int(item.get("score", 85)))),
+                alert_on_error=bool(item.get("alert_on_error", True)),
+            )
+        )
+    return tuple(invariants)
+
+
 def load_policy_book(path: Path) -> PolicyBook:
     """Load a bounded, deterministic protocol policy pack.
 
@@ -96,14 +171,14 @@ def load_policy_book(path: Path) -> PolicyBook:
         return PolicyBook.empty()
     if path.stat().st_size > MAX_POLICY_BYTES:
         raise ConfigurationError(
-            f"Policy file exceeds the {MAX_POLICY_BYTES}-byte safety limit: {path}"
+            f"Policy file exceeds the {MAX_POLICY_BYTES}-byte input limit: {path}"
         )
     raw = path.read_bytes()
     try:
         data: dict[str, Any] = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigurationError(f"Invalid TOML in {path}: {exc}") from exc
-    if int(data.get("schema_version", 1)) != 1:
+    if int(data.get("schema_version", 1)) not in {1, 2}:
         raise ConfigurationError("Unsupported policy schema_version")
 
     configured_policies = data.get("protocols", [])
@@ -136,13 +211,27 @@ def load_policy_book(path: Path) -> PolicyBook:
         protocol = str(item["protocol"]).strip()
         if not protocol:
             raise ConfigurationError("Policy protocol cannot be empty")
+        configured_labels = item.get("selector_labels", {})
+        if not isinstance(configured_labels, dict):
+            raise ConfigurationError("selector_labels must be a TOML table")
+        selector_labels = tuple(
+            sorted(
+                (
+                    next(iter(_selectors([selector], "selector_labels"))),
+                    str(label).strip(),
+                )
+                for selector, label in configured_labels.items()
+            )
+        )
+        if any(not label for _, label in selector_labels):
+            raise ConfigurationError("selector_labels values cannot be empty")
         policies.append(
             ProtocolPolicy(
                 chain_id=chain_id,
                 address=address,
                 protocol=protocol,
                 authorized_senders=frozenset(
-                    _address(value, "authorized sender") for value in authorized
+                    _address(value, "configured sender") for value in authorized
                 ),
                 allowed_selectors=_selectors(
                     item.get("allowed_selectors", []), "allowed_selectors"
@@ -152,6 +241,8 @@ def load_policy_book(path: Path) -> PolicyBook:
                 ),
                 max_native_value_wei=max_native_value_wei,
                 incident_sla_minutes=incident_sla_minutes,
+                selector_labels=selector_labels,
+                invariants=_invariants(item.get("invariants", []), default_target=address),
             )
         )
     return PolicyBook(tuple(policies), hashlib.sha256(raw).hexdigest())
@@ -176,7 +267,7 @@ def assess_pending(
             PolicyFinding(
                 "sender_outside_baseline",
                 15,
-                "The sender is outside the protocol-supplied authorized-sender baseline.",
+                "The sender is outside the protocol-supplied sender baseline.",
             )
         )
     if policy.allowed_selectors and selector not in policy.allowed_selectors:

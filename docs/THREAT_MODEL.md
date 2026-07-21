@@ -2,56 +2,67 @@
 
 ## Protected assets
 
-- RPC, explorer, GitHub, and Telegram credentials;
-- operational watchlists and client identities;
+- RPC, explorer, Telegram, and repository credentials;
+- protocol inventory, policy packs, and contact context;
 - chain cursors and evidence integrity;
-- alert confidentiality and availability;
-- the operator's reputation and legal scope.
+- incident history and alert confidentiality;
+- monitoring availability and signal quality.
+
+## Trust boundaries
+
+| Boundary | Trusted assumption | Verification |
+|---|---|---|
+| Local process | Installed White Radar package and configuration | Commit/build provenance, tests, file permissions |
+| RPC provider | May be incomplete, delayed, inconsistent, or unavailable | Chain ID, confirmations, fallback, evidence links |
+| Explorer metadata | May be absent, stale, or inconsistent | Source label, digest, code/storage comparison |
+| WebSocket stream | Partial provider observation | Confirmed-chain follow-up and heartbeat |
+| Policy file | Operator-supplied baseline | Strict parser, bounded size, SHA-256 |
+| SQLite host | Single administrative domain | WAL, backups, permissions, restore tests |
+| Telegram | External delivery channel | Escaping, score gates, outbox/retry |
 
 ## Threats and controls
 
 | Threat | Primary controls | Residual risk |
 |---|---|---|
-| Accidental transaction broadcast | Fixed RPC allowlist; no signer or private-key setting; tests | Dependency or future-code regression |
-| Secret committed to Git | `.gitignore`; examples contain empty values; CI pattern scan | Previously exposed secrets still require rotation |
-| Malicious/misconfigured RPC | Chain-ID check; confirmations; evidence links | RPC can omit or delay data |
-| Reorg duplicates or gaps | Confirmation delay; cursors; stable event IDs | Deep reorg beyond configured delay |
-| Telegram outage | SQLite alert outbox and retry | Delayed human response |
-| Alert flooding | Bounded scans; minimum score; testnet gate; watchlist pending filter | Scoring still needs operational tuning |
-| False vulnerability inference | Alerts say priority, not exploitability; explainable reasons | Human interpretation error |
-| Public repository intelligence leak | Operational config/watchlist/data are ignored | Architecture remains public |
-| Database corruption | WAL mode; transactional writes; JSONL export | Single-node storage remains a failure domain |
-| Provider mempool blind spots | Explicit limitation and confirmed-chain follow-up | No provider sees the entire network |
-| Trace API cost or unavailability | Disabled by default; watchlist-only calls; bounded confirmed ranges | Provider-specific limits |
-| False bytecode-family inference | Exact hash separated from heuristic SimHash; evidence retained | Similarity is not common ownership |
-| Stale explorer or proxy metadata | Bounded scheduled re-enrichment and drift cases | Refresh cadence and third-party lag |
-| Graph over-attribution | Typed evidence edges and explicit non-attribution policy | Human interpretation error |
-| Misconfigured policy baseline | Strict parsing, file digest, explainable rules, human review | Stale owner-supplied data |
-| Silent process failure | Periodic heartbeats, stale threshold, non-zero health check | Host outage needs external monitoring |
-| Incident status tampering | Controlled state machine and append-only transition records | Local database administrator remains trusted |
+| State-changing RPC regression | Fixed method allowlist, no signing model, unit tests | Future code or dependency defect |
+| Credential disclosure | Ignored runtime files, redaction, CI secret scan, external environment | Previously disclosed credentials require revocation |
+| Provider outage | Ordered HTTP/WS fallbacks, reconnect backoff, heartbeats | Correlated provider or network outage |
+| Provider data manipulation | Chain-ID validation, block hashes, confirmations, evidence links | One-provider view can omit or delay data |
+| Reorganization | Confirmation delay, cursors, idempotent events | Deep reorg beyond configured window |
+| Pending blind spot | Destination filtering plus confirmed follow-up | Private order flow and alternate builders |
+| Simulation mismatch | Explicit pinned block and result hashes | Future ordering/state and provider implementation |
+| Trace resource exhaustion | Inventory/score gates, frame/address caps, opt-in settings | Provider-specific cost and timeout |
+| ABI poisoning/staleness | Verified source label, size/entry bounds, canonical digest | Explorer record may not match active proxy dispatch |
+| Proxy-state ambiguity | Event plus storage snapshot, beacon resolution, code probe | Custom proxy layouts remain possible |
+| Invariant misconfiguration | Typed schema, bounded calls, state transitions, policy digest | Incorrect expected values create misleading cases |
+| Alert flood | Score threshold, transition-only invariants, inventory filter, bounded scans | Protocol thresholds require tuning |
+| Telegram outage | Persistent outbox and retry | Delayed delivery |
+| Database corruption | WAL, transactional writes, JSONL export, backup procedure | Single-host failure domain |
+| Evidence tampering | Stable IDs, source hashes, incident history | Local database administrator remains trusted |
+| Correlation overreach | Typed edges and provenance fields | Human interpretation error |
+| Silent process failure | Workload heartbeats and non-zero health command | Complete host outage needs external monitoring |
 
-## Non-goals
+## Detection assumptions
 
-White Radar does not claim to:
+- Confirmed scanner output is based on the configured confirmation delay, not absolute finality.
+- Pending output describes transactions visible to the selected provider.
+- `eth_call` and traces describe one explicit state snapshot.
+- ABI labels depend on verified metadata or local policy labels.
+- Invariants represent protocol-specific assumptions supplied in policy.
+- Priority aggregates signals for triage and is not itself a vulnerability classification.
 
-- detect every exploit;
-- prove malicious intent from a transaction;
-- provide complete internal-call coverage outside enabled watchlist-scoped traces;
-- guarantee real-time delivery;
-- authorize security research;
-- execute a rescue or recover assets.
-- infer malicious intent solely from a policy deviation.
+## Resource limits
 
-## Security review gates
+- bounded initial lookback and blocks per cycle;
+- bounded policy and ABI document sizes;
+- bounded ABI entry count and static argument count;
+- bounded trace frames and touched addresses;
+- bounded graph traversal depth;
+- bounded refresh and list command limits;
+- bounded HTTP retries and reconnect backoff.
 
-Any future component that can sign or submit transactions must be a separate service and requires:
+## Security regression gates
 
-- written protocol authorization;
-- a dedicated legal review;
-- hardware-backed keys and role separation;
-- multi-party approval;
-- transaction policy simulation;
-- value and gas limits;
-- an immutable audit trail;
-- independent code review and adversarial testing;
-- an emergency stop and post-incident reconciliation process.
+Every change that affects RPC, persistence, parsing, simulation, trace handling, or secret
+boundaries must include deterministic tests. CI enforces formatting, lint, strict type checking,
+coverage, bytecode compilation, packaging, and secret-pattern scanning.

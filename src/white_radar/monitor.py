@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import json
 import logging
-import os
 
-from white_radar.config import Settings, Watchlist
+from white_radar.config import Settings, Watchlist, configured_endpoints
 from white_radar.enrichment import ContractEnricher
 from white_radar.fingerprint import BytecodeFingerprint, fingerprint_bytecode
+from white_radar.invariants import InvariantCheck, check_policy_invariants
 from white_radar.logging import log_context
 from white_radar.models import (
     ChainConfig,
@@ -17,6 +18,8 @@ from white_radar.models import (
     stable_event_id,
     utc_now,
 )
+from white_radar.policy import ProtocolPolicy, load_policy_book
+from white_radar.proxy import inspect_proxy
 from white_radar.rpc import JsonRpcClient, hex_to_int
 from white_radar.scoring import score_deployment, score_profile_change, score_upgrade
 from white_radar.storage import RadarStore
@@ -44,6 +47,10 @@ class ScanStats:
     alerts: int = 0
     profiles_refreshed: int = 0
     profile_changes: int = 0
+    invariants_checked: int = 0
+    invariant_transitions: int = 0
+    rpc_endpoint_count: int = 1
+    rpc_active_endpoint: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -59,8 +66,8 @@ class ChainScanner:
         store: RadarStore,
         notifier: TelegramNotifier,
     ) -> None:
-        rpc_url = os.getenv(chain.rpc_http_env, "").strip()
-        if not rpc_url:
+        rpc_urls = configured_endpoints(chain.rpc_http_env, chain.rpc_http_fallback_envs)
+        if not rpc_urls:
             raise RuntimeError(f"Missing {chain.rpc_http_env} for enabled chain {chain.name}")
         self.settings = settings
         self.chain = chain
@@ -68,10 +75,11 @@ class ChainScanner:
         self.store = store
         self.notifier = notifier
         self.rpc = JsonRpcClient(
-            rpc_url,
+            rpc_urls,
             timeout=settings.app.request_timeout_seconds,
             retries=settings.app.request_retries,
         )
+        self.policy_book = load_policy_book(settings.app.policy_path)
         self.enricher = ContractEnricher(
             settings.enrichment,
             timeout=settings.app.request_timeout_seconds,
@@ -95,21 +103,39 @@ class ChainScanner:
         )
         stats = ScanStats(chain=self.chain.name)
         self._flush_alerts(stats)
+        if self.settings.analysis.invariant_checks_enabled:
+            self._scan_invariants(safe_head, stats)
         if start > safe_head:
+            self._set_rpc_stats(stats)
             return stats
         end = min(safe_head, start + self.chain.max_blocks_per_cycle - 1)
         stats.start_block = start
         stats.end_block = end
 
         # Run range-level log monitoring before advancing the confirmed-block cursor.
-        # Event insertion is idempotent, so a later block failure is safe to retry.
+        # Event insertion is idempotent, so a later block failure can be retried.
         self._scan_upgrades(start, end, stats)
         for number in range(start, end + 1):
             self._scan_block(number, stats)
             self.store.set_cursor(self.chain.chain_id, number)
             stats.blocks += 1
         self._flush_alerts(stats)
+        self._set_rpc_stats(stats)
         LOGGER.info("chain scan complete", extra=log_context(**stats.to_dict()))
+        return stats
+
+    def check_invariants(self) -> ScanStats:
+        actual_chain_id = self.rpc.chain_id()
+        if actual_chain_id != self.chain.chain_id:
+            raise RuntimeError(
+                f"RPC chain mismatch for {self.chain.name}: expected {self.chain.chain_id}, "
+                f"received {actual_chain_id}"
+            )
+        safe_head = max(0, self.rpc.block_number() - self.chain.confirmations)
+        stats = ScanStats(chain=self.chain.name)
+        self._scan_invariants(safe_head, stats)
+        self._flush_alerts(stats)
+        self._set_rpc_stats(stats)
         return stats
 
     def refresh_profiles(self, *, limit: int, min_age_minutes: int) -> ScanStats:
@@ -130,8 +156,124 @@ class ChainScanner:
         for profile in profiles:
             self._refresh_profile(profile, stats)
         self._flush_alerts(stats)
+        self._set_rpc_stats(stats)
         LOGGER.info("profile refresh complete", extra=log_context(**stats.to_dict()))
         return stats
+
+    def _set_rpc_stats(self, stats: ScanStats) -> None:
+        stats.rpc_endpoint_count = int(getattr(self.rpc, "endpoint_count", 1))
+        stats.rpc_active_endpoint = int(getattr(self.rpc, "active_endpoint_index", 0))
+
+    @staticmethod
+    def _state_value(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        return str(value)
+
+    def _scan_invariants(self, block_number: int, stats: ScanStats) -> None:
+        policies = self.policy_book.for_chain(self.chain.chain_id)
+        if not policies:
+            return
+        block = self.rpc.block(block_number, full_transactions=False) or {}
+        block_hash = str(block.get("hash") or "") or None
+        for policy in policies:
+            for check in check_policy_invariants(
+                self.rpc,
+                policy,
+                block_number=block_number,
+                block_hash=block_hash,
+            ):
+                stats.invariants_checked += 1
+                self._record_invariant_transition(policy, check, stats)
+
+    def _record_invariant_transition(
+        self,
+        policy: ProtocolPolicy,
+        check: InvariantCheck,
+        stats: ScanStats,
+    ) -> None:
+        previous = self.store.record_invariant_state(
+            chain_id=self.chain.chain_id,
+            policy_address=policy.address,
+            invariant_name=check.name,
+            status=check.status,
+            observed_value=self._state_value(check.observed),
+            expected_value=self._state_value(check.expected),
+            block_number=check.block_number,
+            block_hash=check.block_hash,
+        )
+        previous_status = str(previous.get("status")) if previous else None
+        previous_value = str(previous.get("observed_value")) if previous else None
+        current_value = self._state_value(check.observed)
+        changed = previous_status != check.status or previous_value != current_value
+        if not changed or check.status == "unavailable":
+            return
+        recovery = check.status == "ok" and previous_status in {"violated", "error"}
+        if check.status == "ok" and not recovery:
+            return
+        event_type = "protocol_invariant_recovered" if recovery else "protocol_invariant_violation"
+        error_score = max(50, check.score - 15)
+        score = 20 if recovery else (error_score if check.status == "error" else check.score)
+        reasons = (
+            (
+                f"Protocol invariant {check.name} returned to its configured baseline.",
+                f"Previous state was {previous_status}.",
+            )
+            if recovery
+            else (
+                (
+                    f"Protocol invariant {check.name} is {check.status} "
+                    f"at pinned block {check.block_number}."
+                ),
+                f"Observed {current_value}; configured operator is {check.operator}.",
+            )
+        )
+        event = RadarEvent(
+            event_id=stable_event_id(
+                event_type,
+                self.chain.chain_id,
+                policy.address,
+                check.name,
+                check.block_number,
+                check.status,
+                current_value,
+            ),
+            observed_at=utc_now(),
+            event_type=event_type,
+            title=(
+                "Protocol invariant recovered"
+                if recovery
+                else "Protocol invariant requires investigation"
+            ),
+            summary=(
+                f"{policy.protocol} invariant {check.name} changed to {check.status} "
+                f"on {self.chain.display_name}."
+            ),
+            chain=self.chain.name,
+            chain_id=self.chain.chain_id,
+            score=score,
+            severity=severity_for_score(score),
+            confidence=0.98 if check.status != "error" else 0.8,
+            reasons=reasons,
+            recommended_action=(
+                "Correlate the invariant transition with governance, upgrades, oracle inputs, "
+                "and the protocol change calendar; preserve the pinned-block evidence."
+            ),
+            subject_address=policy.address,
+            block_number=check.block_number,
+            evidence={"contract": f"{self.chain.explorer_url}/address/{policy.address}"},
+            metadata={
+                "protocol": policy.protocol,
+                "invariant": check.to_dict(),
+                "previous_status": previous_status,
+                "previous_observed_value": previous_value,
+                "policy_sha256": self.policy_book.source_sha256,
+            },
+        )
+        self._record_and_alert(event, stats)
+        stats.invariant_transitions += 1
 
     def _refresh_profile(self, profile: dict[str, object], stats: ScanStats) -> None:
         address = str(profile["address"])
@@ -311,7 +453,7 @@ class ChainScanner:
             trace = self.rpc.trace_transaction(tx_hash)
         except Exception:
             LOGGER.exception(
-                "authorized transaction trace failed",
+                "inventory transaction trace failed",
                 extra=log_context(chain=self.chain.name, tx_hash=tx_hash),
             )
             return
@@ -565,6 +707,19 @@ class ChainScanner:
                 watched_protocol=watched.protocol if watched else None,
                 global_scan=self.chain.monitor_global_upgrades,
             )
+            proxy_snapshot = None
+            try:
+                proxy_snapshot = inspect_proxy(self.rpc, proxy, block_number=block_number)
+            except Exception:
+                LOGGER.exception(
+                    "proxy snapshot failed",
+                    extra=log_context(chain=self.chain.name, address=proxy),
+                )
+            snapshot_delta = proxy_snapshot.score_delta if proxy_snapshot else 0
+            final_score = min(100, score.score + snapshot_delta)
+            snapshot_reasons = (
+                tuple(item.summary for item in proxy_snapshot.findings) if proxy_snapshot else ()
+            )
             indexed_address = None
             if len(topics) > 1 and len(str(topics[1])) >= 42:
                 indexed_address = "0x" + str(topics[1])[-40:].lower()
@@ -578,10 +733,10 @@ class ChainScanner:
                 summary=f"{event_name} emitted by {proxy} on {self.chain.display_name}.",
                 chain=self.chain.name,
                 chain_id=self.chain.chain_id,
-                score=score.score,
-                severity=severity_for_score(score.score),
+                score=final_score,
+                severity=severity_for_score(final_score),
                 confidence=score.confidence,
-                reasons=score.reasons,
+                reasons=score.reasons + snapshot_reasons,
                 recommended_action=score.recommended_action,
                 subject_address=proxy,
                 tx_hash=tx_hash,
@@ -598,6 +753,7 @@ class ChainScanner:
                     "bounty_url": watched.bounty_url if watched else "",
                     "contact_uri": watched.contact_uri if watched else "",
                     "verification_source": "on-chain event log",
+                    "proxy_snapshot": proxy_snapshot.to_dict() if proxy_snapshot else None,
                 },
             )
             proxy_node = self.store.upsert_identity_node(

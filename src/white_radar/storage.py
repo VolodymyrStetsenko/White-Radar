@@ -159,6 +159,32 @@ CREATE TABLE IF NOT EXISTS service_heartbeats (
     last_error TEXT,
     PRIMARY KEY (service_name, chain_id)
 );
+
+CREATE TABLE IF NOT EXISTS abi_catalogs (
+    chain_id INTEGER NOT NULL,
+    address TEXT NOT NULL,
+    source TEXT NOT NULL,
+    abi_sha256 TEXT NOT NULL,
+    selectors_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (chain_id, address)
+);
+
+CREATE TABLE IF NOT EXISTS invariant_states (
+    chain_id INTEGER NOT NULL,
+    policy_address TEXT NOT NULL,
+    invariant_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    observed_value TEXT,
+    expected_value TEXT,
+    block_number INTEGER NOT NULL,
+    block_hash TEXT,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (chain_id, policy_address, invariant_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invariant_states_status
+ON invariant_states (status, checked_at);
 """
 
 OPEN_INCIDENT_STATUSES = frozenset(
@@ -585,6 +611,124 @@ class RadarStore:
                 ),
             )
 
+    def get_abi_catalog(self, chain_id: int, address: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT source, abi_sha256, selectors_json, updated_at
+                FROM abi_catalogs
+                WHERE chain_id = ? AND address = ?
+                """,
+                (chain_id, address.lower()),
+            ).fetchone()
+        if not row:
+            return None
+        selectors = json.loads(str(row["selectors_json"]))
+        if not isinstance(selectors, dict):
+            return None
+        return {
+            "source": str(row["source"]),
+            "abi_sha256": str(row["abi_sha256"]),
+            "selectors": {str(key): str(value) for key, value in selectors.items()},
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def upsert_abi_catalog(
+        self,
+        *,
+        chain_id: int,
+        address: str,
+        source: str,
+        abi_sha256: str,
+        selectors: dict[str, str],
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO abi_catalogs(
+                    chain_id, address, source, abi_sha256, selectors_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chain_id, address) DO UPDATE SET
+                    source = excluded.source,
+                    abi_sha256 = excluded.abi_sha256,
+                    selectors_json = excluded.selectors_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chain_id,
+                    address.lower(),
+                    source,
+                    abi_sha256,
+                    json.dumps(selectors, sort_keys=True, separators=(",", ":")),
+                    utc_now(),
+                ),
+            )
+
+    def record_invariant_state(
+        self,
+        *,
+        chain_id: int,
+        policy_address: str,
+        invariant_name: str,
+        status: str,
+        observed_value: str | None,
+        expected_value: str | None,
+        block_number: int,
+        block_hash: str | None,
+    ) -> dict[str, Any] | None:
+        """Persist an invariant snapshot and return the previous state, if any."""
+
+        with self.connect() as connection:
+            previous = connection.execute(
+                """
+                SELECT status, observed_value, expected_value, block_number, block_hash, checked_at
+                FROM invariant_states
+                WHERE chain_id = ? AND policy_address = ? AND invariant_name = ?
+                """,
+                (chain_id, policy_address.lower(), invariant_name),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO invariant_states(
+                    chain_id, policy_address, invariant_name, status, observed_value,
+                    expected_value, block_number, block_hash, checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chain_id, policy_address, invariant_name) DO UPDATE SET
+                    status = excluded.status,
+                    observed_value = excluded.observed_value,
+                    expected_value = excluded.expected_value,
+                    block_number = excluded.block_number,
+                    block_hash = excluded.block_hash,
+                    checked_at = excluded.checked_at
+                """,
+                (
+                    chain_id,
+                    policy_address.lower(),
+                    invariant_name,
+                    status,
+                    observed_value,
+                    expected_value,
+                    block_number,
+                    block_hash,
+                    utc_now(),
+                ),
+            )
+        return dict(previous) if previous else None
+
+    def list_invariant_states(
+        self, *, chain_id: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM invariant_states"
+        parameters: list[object] = []
+        if chain_id is not None:
+            query += " WHERE chain_id = ?"
+            parameters.append(chain_id)
+        query += " ORDER BY checked_at DESC LIMIT ?"
+        parameters.append(max(1, min(5000, limit)))
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [dict(row) for row in rows]
+
     def health_snapshot(
         self,
         *,
@@ -922,7 +1066,19 @@ class RadarStore:
             )
             nodes = int(connection.execute("SELECT COUNT(*) FROM identity_nodes").fetchone()[0])
             edges = int(connection.execute("SELECT COUNT(*) FROM identity_edges").fetchone()[0])
-        return {"profiles": profiles, "identity_nodes": nodes, "identity_edges": edges}
+            abi_catalogs = int(
+                connection.execute("SELECT COUNT(*) FROM abi_catalogs").fetchone()[0]
+            )
+            invariants = int(
+                connection.execute("SELECT COUNT(*) FROM invariant_states").fetchone()[0]
+            )
+        return {
+            "profiles": profiles,
+            "identity_nodes": nodes,
+            "identity_edges": edges,
+            "abi_catalogs": abi_catalogs,
+            "invariant_states": invariants,
+        }
 
     def mark_alerted(self, event_id: str) -> None:
         with self.connect() as connection:

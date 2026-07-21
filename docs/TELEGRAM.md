@@ -1,43 +1,82 @@
 # Telegram alerts
 
-The original low-context format is replaced by an evidence-first case card.
+White Radar renders evidence-first Telegram case cards.
 
 ## Case fields
 
-- product and event title;
-- priority score, severity band, and confidence;
-- network, chain ID, block, contract, and deployer;
-- verified name and verification source;
-- runtime bytecode size;
-- EIP-1967 proxy and implementation details;
-- number of related contracts from the same deployer in 24 hours;
-- up to five related contract labels and blocks;
-- explainable score reasons;
-- a safe recommended action;
-- stable case ID;
-- pending sender, protocol role, selector, native value, policy state, and finding codes;
-- transaction, contract, and authorized-scope buttons.
+Depending on event type and available evidence, a card can include:
 
-## Noise controls
+- event title, priority, severity, and confidence;
+- network, chain ID, block, transaction, contract, and observed actor;
+- protocol/component label;
+- verified contract name and metadata source;
+- runtime bytecode size and proxy state;
+- sender, selector, verified function signature, native value, and fee fields;
+- policy baseline state and finding codes;
+- simulation status and pinned block;
+- trace call count, depth, delegated calls, and creations;
+- invariant name, status, and observed value;
+- effective proxy implementation;
+- related deployment cluster;
+- score reasons, next analysis action, and stable case ID;
+- direct transaction and contract explorer links.
 
-`minimum_score` controls Telegram delivery, not evidence collection. Lower-scored cases remain in
-SQLite for search and export. Testnet alerts are independently disabled by default.
+All dynamic text is HTML-escaped before delivery.
 
-Pending alerts are generated only for explicitly watchlisted destinations. A selector match is a
-protocol-configured triage signal, not proof of an attack.
+## Delivery controls
+
+`minimum_score` controls delivery, not evidence collection. Lower-priority events remain in
+SQLite for search, reporting, and export.
+
+```toml
+[telegram]
+enabled = true
+minimum_score = 60
+send_testnet_alerts = false
+```
+
+```dotenv
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+WHITE_RADAR_DRY_RUN=true
+```
+
+Preview the newest case:
+
+```bash
+white-radar preview-alert
+```
+
+Set `WHITE_RADAR_DRY_RUN=false` when delivery is ready.
+
+## Alert outbox
+
+Eligible events are persisted before delivery. A Telegram failure leaves the event unalerted so a
+later scanner cycle can retry it. This prevents delivery availability from controlling chain
+cursor progress.
 
 ## Digests
 
-`white-radar digest --hours 24` renders a compact summary of case counts by severity, network,
-signal type, open/overdue incident totals, and the highest-priority cases. Printing is the default.
-`--send` is an explicit action
-and still respects Telegram configuration and dry-run mode.
+```bash
+white-radar digest --hours 24
+white-radar digest --hours 1 --send
+```
 
-## Safe rollout
+The digest contains:
 
-1. Keep `WHITE_RADAR_DRY_RUN=true`.
-2. Run confirmed scanners for several cycles.
-3. Inspect `white-radar events` and `white-radar preview-alert`.
-4. Tune the watchlist and `minimum_score`.
-5. Use a private Telegram chat or channel.
-6. Set `WHITE_RADAR_DRY_RUN=false` only after review.
+- case counts by severity;
+- network and event-type totals;
+- open and overdue incident counts;
+- highest-priority case summaries.
+
+Printing is the default. `--send` requires Telegram enabled, credentials present, and dry-run
+disabled.
+
+## Operational verification
+
+1. Run one confirmed scan and one invariant cycle.
+2. Inspect `white-radar events`.
+3. Render `white-radar preview-alert`.
+4. Tune `minimum_score` and testnet delivery.
+5. Send one manual digest.
+6. Enable the digest timer.

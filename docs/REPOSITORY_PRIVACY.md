@@ -1,42 +1,72 @@
 # Repository privacy
 
-The repository contains defensive monitoring source code only. `.env`, `watchlist.toml`, databases,
-logs, and local configuration are ignored. A public repository can support portfolio evidence and
-independent review, but it also reveals the architecture and detection rules.
+White Radar separates source code from operational data.
 
-Use a private repository when the code, client names, watchlist, deployment model, or operational
-thresholds are confidential.
+## Repository contents
 
-For a proprietary single-operator deployment, the recommended default is a private repository.
-Visibility can be reconsidered later after a deliberate public/private split.
+The source repository contains:
+
+- engine source;
+- database schema;
+- sanitized configuration examples;
+- deployment templates;
+- tests and CI;
+- product and operations documentation.
+
+The following paths are ignored and remain local:
+
+- `.env`;
+- `config.toml`;
+- `watchlist.toml`;
+- `policies.toml`;
+- `data/`;
+- `evidence/`;
+- databases, WAL files, logs, reports, and exports.
+
+## Visibility decision
+
+A private repository is the default for proprietary detection logic, deployment topology, internal
+roadmaps, or restricted client context.
+
+A public repository can contain a sanitized engine, architecture, examples, and product
+documentation. Operational policies, protocol inventory, real reports, provider topology,
+thresholds, and incident runbooks should remain in a separate private repository or secret/data
+store.
+
+## GitHub privacy procedure
+
+1. Open repository **Settings**.
+2. Under **General**, open **Danger Zone**.
+3. Select **Change repository visibility**.
+4. Choose **Make private** and confirm.
+5. Review collaborators, teams, deploy keys, installed GitHub Apps, Actions secrets, environments,
+   branch protection, and rulesets.
+6. Enable secret scanning and push protection where the account plan supports them.
+
+Official instructions:
+[Setting repository visibility](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility).
+
+## Credential handling
+
+Repository visibility is not a credential-control mechanism. Any credential that appears in chat,
+an issue, a log, an archive, a commit, or a public file must be revoked and replaced. Removing a
+file or rewriting history does not invalidate the credential.
+
+Use:
+
+- repository/environment secrets for CI;
+- a host environment file or secret manager for runtime;
+- narrowly scoped credentials;
+- independent production and development credentials;
+- documented rotation and revocation.
 
 ## Public/private split
 
-A public showcase repository may contain the product overview, redacted screenshots, high-level
-architecture, safety model, and sanitized examples. Keep detection policy packs, operational
-watchlists, real reports, client or protocol scope, provider topology, thresholds, deployment
-inventory, and private runbooks in a separate private repository.
+When maintaining both editions:
 
-Never make a private engine a Git submodule of the public repository, and never copy live runtime
-data into a public demonstration branch.
-
-## Make the GitHub repository private
-
-1. Open the repository on GitHub.
-2. Select **Settings**.
-3. Under **General**, scroll to **Danger Zone**.
-4. Select **Change repository visibility**.
-5. Choose **Make private** and complete GitHub's confirmation.
-6. Review collaborators, deploy keys, GitHub Apps, Actions secrets, and branch access afterward.
-
-Official instructions: [Setting repository visibility](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility).
-
-Changing a public repository to private does not retract copies that were already cloned, cached,
-forked, or otherwise obtained while it was public. Rotate any credential that was ever exposed;
-repository visibility is not credential remediation.
-
-## Access model
-
-A private repository is visible to its owner and explicitly authorized GitHub collaborators or
-installed applications. An external assistant is not a GitHub collaborator; continued repository
-access depends on the GitHub connector permissions granted by the owner.
+- keep separate repositories;
+- copy only reviewed, sanitized changes into the public edition;
+- do not use the private engine as a public Git submodule;
+- run secret scanning on both staged changes and full history;
+- keep screenshots and example reports redacted;
+- maintain an inventory of installed apps and machine credentials.

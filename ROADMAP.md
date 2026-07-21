@@ -1,43 +1,60 @@
-# Roadmap
+# Engineering roadmap
 
-## 0.1 — Defensive mainnet foundation
+## Delivered platform
 
-- [x] read-only RPC method allowlist;
-- [x] multi-chain confirmed-block scanners;
-- [x] chain-ID validation and configurable confirmations;
-- [x] deployment, verification, EIP-1967, and deployer-cluster enrichment;
-- [x] watchlist/global proxy control-event monitoring;
-- [x] watchlist-only pending observer;
-- [x] explainable scores and professional Telegram cases;
-- [x] SQLite cursors, deduplication, evidence, and alert outbox;
-- [x] JSON logging, JSONL export, CI, Docker, and systemd packaging.
+- [x] read-only multi-chain JSON-RPC boundary with chain-ID validation;
+- [x] confirmed-block scanners with confirmations, cursors, bounded ranges, and idempotency;
+- [x] primary/fallback HTTP and WebSocket provider configuration;
+- [x] top-level and inventory-scoped internal contract-deployment intelligence;
+- [x] EIP-1967, beacon, implementation, UUPS, and upgrade-event analysis;
+- [x] verified ABI selector catalogs and bounded static argument decoding;
+- [x] watchlist-filtered pending transaction intelligence;
+- [x] deterministic sender, selector, value, and SLA baselines;
+- [x] state-pinned `eth_call` simulation and optional bounded call-graph tracing;
+- [x] stateful protocol invariants with violation and recovery transitions;
+- [x] runtime-code normalization, hashing, similarity families, and drift detection;
+- [x] evidence-backed identity graph;
+- [x] incident workflow, reports, Telegram cards, digests, JSONL export, and health checks;
+- [x] Docker, hardened systemd units, CI, coverage gates, and secret scanning.
 
-## 0.2 — Signal quality
+## Engineering priorities
 
-- [x] bounded delayed re-enrichment and material profile-drift cases;
-- [x] Solidity-metadata-normalized runtime fingerprints and similarity clusters;
-- [x] evidence-backed graph foundation for protocols, deployers, senders, contracts, proxies,
-  implementations, admins, beacons, and bytecode relationships;
-- [x] Markdown incident reports and configurable-window Telegram digests;
-- [x] watchlist-scoped internal `CREATE`/`CREATE2` discovery where traces are available;
-- [x] provider-aware filtered pending subscriptions on supported Alchemy networks;
-- [ ] signed per-protocol policy packs and approved identity assertions;
-- [ ] official repository, domain, multisig, and bounty-scope ingestion adapters;
-- [ ] PostgreSQL migration and background work queue.
+### Signal precision
 
-## 0.3 — Authorized protocol defense
+- [ ] event-log ABI decoding with indexed/non-indexed argument support;
+- [ ] rolling statistical baselines for sender, selector, value, gas, and call-frequency changes;
+- [ ] protocol-specific invariant templates for common proxy, vault, oracle, bridge, and governance
+  interfaces;
+- [ ] multi-signal incident correlation across pending, confirmed, invariant, proxy, and drift
+  observations;
+- [ ] reorg reconciliation records for deep or provider-inconsistent reorganizations.
 
-- [x] deterministic protocol-supplied sender, selector, value, and response-SLA baselines;
-- [x] explainable policy findings with a reproducible policy-file digest;
-- [x] incident workflow with acknowledgement deadlines and audited transitions;
-- [x] scanner, pending-observer, and profile-refresh heartbeats with a machine health check;
-- [ ] fork-only transaction simulation with reproducible state snapshots;
-- [ ] anomaly policy signatures reviewed and approved by the protocol owner;
-- [ ] integration adapters for official disclosure and on-call systems;
-- [ ] external metrics export and multi-host service-level objectives.
+### Protocol context
 
-## Separate future responder
+- [ ] signed policy-pack provenance and revision history;
+- [ ] official repository, release manifest, governance, multisig, and security-contact adapters;
+- [ ] bytecode-family labels sourced from verified deployment manifests;
+- [ ] cross-chain protocol identity resolution with explicit evidence provenance;
+- [ ] versioned interface catalogs for standard proxy, vault, token, oracle, and governance systems.
 
-Any transaction-capable responder is outside the White Radar monitoring process. It may be designed
-only for contracted protocols and must satisfy the review gates in the threat model. It will not be
-implemented as a generic exploit copier, public mempool competitor, or autonomous asset custodian.
+### Reliability and scale
+
+- [ ] PostgreSQL storage backend with transactional cursor compatibility;
+- [ ] durable enrichment and alert queues;
+- [ ] Prometheus/OpenTelemetry metrics and multi-host service-level objectives;
+- [ ] provider quorum reads for critical control-state and invariant checks;
+- [ ] deterministic replay harness for recorded blocks and transaction fixtures;
+- [ ] retention, partitioning, backup verification, and evidence-integrity tooling.
+
+### Incident operations
+
+- [ ] on-call, case-management, and disclosure-system adapters;
+- [ ] configurable escalation matrices and acknowledgement policies;
+- [ ] case bundles with manifests, hashes, timelines, and machine-readable evidence indexes;
+- [ ] operator dashboards for chain health, signal volume, open incidents, and policy coverage;
+- [ ] regression corpus derived from public incident postmortems and sanitized protocol fixtures.
+
+## Design constraints
+
+Future work must preserve deterministic evidence, bounded resource use, explicit chain/block
+context, credential redaction, and the read-only RPC boundary.

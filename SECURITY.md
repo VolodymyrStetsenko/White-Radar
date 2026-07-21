@@ -22,8 +22,3 @@ Include:
 Never send API keys, bot tokens, wallet seed phrases, private keys, or `.env` files. If a credential
 was committed, uploaded, pasted into a third-party system, or otherwise exposed, revoke it at the
 provider and issue a replacement. Deleting the file or commit is not sufficient by itself.
-
-## Scope
-
-Security research against White Radar does not authorize testing any monitored protocol, RPC
-provider, explorer, Telegram, GitHub, or other third party.

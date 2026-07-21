@@ -8,7 +8,7 @@ from white_radar.reporting import render_digest, render_incident_report
 
 
 class ReportingTests(unittest.TestCase):
-    def test_incident_report_contains_evidence_and_safety_boundary(self) -> None:
+    def test_incident_report_contains_evidence_and_response_checklist(self) -> None:
         graph = {
             "nodes": [{"node_id": "n1"}, {"node_id": "n2"}],
             "edges": [
@@ -21,9 +21,9 @@ class ReportingTests(unittest.TestCase):
         }
         report = render_incident_report(sample_event(), ETHEREUM, graph=graph)
         self.assertIn("# White Radar case case-123", report)
-        self.assertIn("unverified security signal", report)
+        self.assertIn("security signal awaiting evidence-based disposition", report)
         self.assertIn("## Identity neighborhood", report)
-        self.assertIn("Do not replay", report)
+        self.assertIn("Incident response checklist", report)
         self.assertIn("etherscan.io", report)
 
     def test_digest_summarizes_and_escapes_cases(self) -> None:

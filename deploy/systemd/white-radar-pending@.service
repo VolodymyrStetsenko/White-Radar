@@ -1,5 +1,5 @@
 [Unit]
-Description=White Radar authorized pending observer for %i
+Description=White Radar protocol pending observer for %i
 After=network-online.target
 Wants=network-online.target
 

@@ -68,7 +68,86 @@ class ChangedEnricher:
         )
 
 
+class InvariantRpc:
+    def __init__(self, observed: int) -> None:
+        self.observed = observed
+
+    def chain_id(self) -> int:
+        return 1
+
+    def block_number(self) -> int:
+        return 102
+
+    def block(self, number: int, *, full_transactions: bool = False) -> dict[str, Any]:
+        return {"number": hex(number), "hash": "0x" + "ab" * 32}
+
+    def eth_call(self, transaction: dict[str, object], block: str) -> str:
+        self.last_call = (transaction, block)
+        return "0x" + f"{self.observed:064x}"
+
+
+class MismatchedInvariantRpc(InvariantRpc):
+    def chain_id(self) -> int:
+        return 2
+
+
 class MonitoringTests(unittest.TestCase):
+    def test_records_invariant_violation_recovery_and_unchanged_state(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"RPC_ETHEREUM_HTTP": "https://example.invalid/v2/test"}),
+        ):
+            root = Path(directory)
+            settings = settings_for(root)
+            settings.app.policy_path.write_text(
+                """
+schema_version = 2
+[[protocols]]
+chain_id = 1
+address = "0x1111111111111111111111111111111111111111"
+protocol = "Example"
+
+[[protocols.invariants]]
+name = "Supply ceiling"
+call_data = "0x18160ddd"
+decode_as = "uint256"
+operator = "lte"
+expected = 100
+score = 90
+""",
+                encoding="utf-8",
+            )
+            store = RadarStore(settings.app.database_path)
+            store.initialize()
+            scanner = ChainScanner(
+                settings=settings,
+                chain=ETHEREUM,
+                watchlist=Watchlist((), ()),
+                store=store,
+                notifier=TelegramNotifier(settings.telegram, True, 1, 1),
+            )
+            rpc = InvariantRpc(101)
+            scanner.rpc = rpc  # type: ignore[assignment]
+
+            violated = scanner.check_invariants()
+            self.assertEqual(violated.invariants_checked, 1)
+            self.assertEqual(violated.invariant_transitions, 1)
+            self.assertEqual(store.recent_events(1)[0].event_type, "protocol_invariant_violation")
+            self.assertEqual(rpc.last_call[1], "0x64")
+
+            rpc.observed = 100
+            recovered = scanner.check_invariants()
+            self.assertEqual(recovered.invariant_transitions, 1)
+            self.assertEqual(store.recent_events(1)[0].event_type, "protocol_invariant_recovered")
+
+            unchanged = scanner.check_invariants()
+            self.assertEqual(unchanged.invariant_transitions, 0)
+            self.assertEqual(store.intelligence_counts()["invariant_states"], 1)
+
+            scanner.rpc = MismatchedInvariantRpc(100)  # type: ignore[assignment]
+            with self.assertRaises(RuntimeError):
+                scanner.check_invariants()
+
     def test_groups_related_deployments_and_persists_events(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -126,7 +205,7 @@ class MonitoringTests(unittest.TestCase):
                 2,
             )
 
-    def test_traces_internal_creations_only_for_authorized_watchlist_target(self) -> None:
+    def test_traces_internal_creations_only_for_inventory_target(self) -> None:
         factory = "0x" + "66" * 20
         created = "0x" + "77" * 20
         creator = "0x" + "88" * 20

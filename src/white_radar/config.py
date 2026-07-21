@@ -14,7 +14,7 @@ SELECTOR_RE = re.compile(r"^0x[a-fA-F0-9]{8}$")
 
 
 class ConfigurationError(ValueError):
-    """Raised when operational configuration is unsafe or invalid."""
+    """Raised when operational configuration is invalid."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -46,12 +46,22 @@ class EnrichmentConfig:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class AnalysisConfig:
+    pending_simulation_enabled: bool = False
+    pending_simulation_minimum_score: int = 70
+    trace_call_enabled: bool = False
+    invariant_checks_enabled: bool = True
+    abi_resolution_enabled: bool = True
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class Settings:
     root: Path
     app: AppConfig
     telegram: TelegramConfig
     enrichment: EnrichmentConfig
     chains: tuple[ChainConfig, ...]
+    analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
 
     def enabled_chains(self) -> tuple[ChainConfig, ...]:
         return tuple(chain for chain in self.chains if chain.enabled)
@@ -121,6 +131,30 @@ def _as_bool(value: str | bool | None, default: bool) -> bool:
     raise ConfigurationError(f"Invalid boolean value: {value}")
 
 
+def configured_endpoints(primary_env: str, fallback_envs: tuple[str, ...]) -> tuple[str, ...]:
+    """Resolve unique endpoint values while keeping environment-variable names out of evidence."""
+
+    values: list[str] = []
+    for name in (primary_env, *fallback_envs):
+        if not name:
+            continue
+        value = os.getenv(name, "").strip()
+        if value and value not in values:
+            values.append(value)
+    return tuple(values)
+
+
+def _environment_names(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ConfigurationError(f"{field} must be a TOML array")
+    names = tuple(str(item).strip() for item in value)
+    if any(not name or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in names):
+        raise ConfigurationError(f"{field} contains an invalid environment-variable name")
+    if len(set(names)) != len(names):
+        raise ConfigurationError(f"{field} contains a duplicate environment-variable name")
+    return names
+
+
 def load_settings(config_path: str | Path | None = None) -> Settings:
     requested_value: str | Path = (
         config_path
@@ -135,6 +169,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     app_data = data.get("app", {})
     telegram_data = data.get("telegram", {})
     enrichment_data = data.get("enrichment", {})
+    analysis_data = data.get("analysis", {})
 
     configured_db = os.getenv(
         "WHITE_RADAR_DB", str(app_data.get("database_path", "data/white-radar.sqlite3"))
@@ -185,6 +220,15 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         sourcify_enabled=bool(enrichment_data.get("sourcify_enabled", True)),
         etherscan_enabled=bool(enrichment_data.get("etherscan_enabled", True)),
     )
+    analysis = AnalysisConfig(
+        pending_simulation_enabled=bool(analysis_data.get("pending_simulation_enabled", False)),
+        pending_simulation_minimum_score=max(
+            0, min(100, int(analysis_data.get("pending_simulation_minimum_score", 70)))
+        ),
+        trace_call_enabled=bool(analysis_data.get("trace_call_enabled", False)),
+        invariant_checks_enabled=bool(analysis_data.get("invariant_checks_enabled", True)),
+        abi_resolution_enabled=bool(analysis_data.get("abi_resolution_enabled", True)),
+    )
 
     chains: list[ChainConfig] = []
     seen_ids: set[int] = set()
@@ -208,7 +252,17 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             monitor_global_upgrades=bool(item.get("monitor_global_upgrades", False)),
             pending_subscription=pending_subscription,
             trace_internal_creations=bool(item.get("trace_internal_creations", False)),
+            rpc_http_fallback_envs=_environment_names(
+                item.get("rpc_http_fallback_envs", []), "rpc_http_fallback_envs"
+            ),
+            rpc_ws_fallback_envs=_environment_names(
+                item.get("rpc_ws_fallback_envs", []), "rpc_ws_fallback_envs"
+            ),
         )
+        if chain.rpc_http_env in chain.rpc_http_fallback_envs:
+            raise ConfigurationError("Primary HTTP RPC environment variable is duplicated")
+        if chain.rpc_ws_env and chain.rpc_ws_env in chain.rpc_ws_fallback_envs:
+            raise ConfigurationError("Primary WebSocket RPC environment variable is duplicated")
         if chain.chain_id in seen_ids or chain.name in seen_names:
             raise ConfigurationError(f"Duplicate chain configuration: {chain.name}")
         seen_ids.add(chain.chain_id)
@@ -217,7 +271,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
 
     if not chains:
         raise ConfigurationError("At least one [[chains]] entry is required")
-    return Settings(root, app, telegram, enrichment, tuple(chains))
+    return Settings(root, app, telegram, enrichment, tuple(chains), analysis)
 
 
 def _validate_address(value: object, field: str) -> str:

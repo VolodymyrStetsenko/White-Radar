@@ -118,7 +118,13 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(store.events_since(hours=1), [event])
             self.assertEqual(
                 store.intelligence_counts(),
-                {"profiles": 1, "identity_nodes": 2, "identity_edges": 1},
+                {
+                    "profiles": 1,
+                    "identity_nodes": 2,
+                    "identity_edges": 1,
+                    "abi_catalogs": 0,
+                    "invariant_states": 0,
+                },
             )
             due = store.profiles_due_for_refresh(
                 chain_id=1,
@@ -186,6 +192,51 @@ class StorageTests(unittest.TestCase):
             degraded = store.health_snapshot(stale_after_seconds=120)
             self.assertFalse(degraded["ok"])
             self.assertEqual(degraded["services"][0]["last_error"], "TimeoutError")
+
+    def test_abi_catalog_and_invariant_state_are_upserted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RadarStore(Path(directory) / "radar.sqlite3")
+            store.initialize()
+            address = "0x" + "11" * 20
+            store.upsert_abi_catalog(
+                chain_id=1,
+                address=address,
+                source="Etherscan",
+                abi_sha256="a" * 64,
+                selectors={"0x18160ddd": "totalSupply()"},
+            )
+            catalog = store.get_abi_catalog(1, address)
+            self.assertIsNotNone(catalog)
+            assert catalog is not None
+            self.assertEqual(catalog["selectors"]["0x18160ddd"], "totalSupply()")
+
+            previous = store.record_invariant_state(
+                chain_id=1,
+                policy_address=address,
+                invariant_name="Supply ceiling",
+                status="ok",
+                observed_value="100",
+                expected_value="100",
+                block_number=100,
+                block_hash="0x" + "aa" * 32,
+            )
+            self.assertIsNone(previous)
+            previous = store.record_invariant_state(
+                chain_id=1,
+                policy_address=address,
+                invariant_name="Supply ceiling",
+                status="violated",
+                observed_value="101",
+                expected_value="100",
+                block_number=101,
+                block_hash="0x" + "bb" * 32,
+            )
+            self.assertIsNotNone(previous)
+            assert previous is not None
+            self.assertEqual(previous["status"], "ok")
+            self.assertEqual(store.list_invariant_states(chain_id=1)[0]["status"], "violated")
+            self.assertEqual(store.intelligence_counts()["abi_catalogs"], 1)
+            self.assertEqual(store.intelligence_counts()["invariant_states"], 1)
 
 
 if __name__ == "__main__":
