@@ -1,4 +1,4 @@
-# Transaction incident reconstruction
+# WhiteRadar Incident reconstruction
 
 ## Purpose
 
@@ -32,6 +32,9 @@ white-radar investigate \
   --max-hops 4 \
   --max-transactions 250 \
   --max-addresses 128 \
+  --hub-min-records 64 \
+  --hub-min-counterparties 32 \
+  --max-hub-candidates 12 \
   --history-source auto \
   --output evidence/case-name
 ```
@@ -75,9 +78,10 @@ confirmation. It then reconstructs:
 
 ### 2. Frontier construction
 
-The first history frontier contains the seed origin and observed non-zero transfer endpoints. If
-the seed contains no transfer endpoint, the top-level destination is used. Token contracts and the
-zero address are not automatically interpreted as controlled entities.
+The first history frontier contains the seed origin, top-level destination, and committed non-zero
+transfer endpoints. This preserves contract-side setup and governance history even when a seed
+also moves assets. Token contracts, routers, and shared services are not interpreted as controlled
+entities; high-fanout infrastructure is bounded by the hub controls described below.
 
 ### 3. Bounded history discovery
 
@@ -108,8 +112,16 @@ Candidate scoring is deterministic. It prioritizes internal and token-transfer e
 normal address touch, adds weight for non-zero value, recognizes inbound evidence before the seed
 and outbound evidence after the seed, and prefers candidates close to the seed block.
 
-The score is a linkage ranking, not a severity or guilt score. The exact source address, record
+Scores are intentionally not capped at 100, so evidence-rich candidates remain distinguishable
+instead of collapsing into one saturated value. The score is a linkage ranking, not a severity or
+guilt score. The exact source address, record
 type, direction, transaction hash, and source adapter remain in the case evidence.
+
+An address is treated as a high-fanout hub only when both its bounded history-record count and its
+unique-counterparty count cross configured thresholds. Hub evidence remains in the case, while
+only the strongest bounded set of hub-linked candidate transactions is reconstructed and
+hub-only candidates do not recursively expand. Coverage records the detected hubs and the number
+of history records suppressed from expansion.
 
 ### 5. Related transaction reconstruction
 
@@ -128,12 +140,22 @@ New transfer counterparties can enter the next frontier until one of these contr
 Transactions and addresses are deduplicated, which prevents graph cycles from causing unbounded
 reprocessing.
 
+Only transfers classified as `committed` can extend the follow-funds frontier. Native value from a
+reverted transaction, a failed internal frame, or any descendant of that failed frame is retained
+as `attempted_reverted` execution evidence and never reported as final fund movement. Receipt-log
+transfers are committed evidence for successful mined receipts; inconsistent reverted receipts
+with logs are marked `unknown`.
+
 ### 6. Aggregation and export
 
 All successfully reconstructed transactions are ordered by block, transaction index, and hash.
 White Radar aggregates address roles, transaction membership, calls, transfers, proxy snapshots,
 findings, timelines, and evidence-referenced graph edges. It then writes a deterministic bundle
 and SHA-256 manifest.
+
+The report begins with a compact core candidate path: the operator seed plus directly linked
+one-hop transactions. The complete bounded graph remains available separately. The core path is a
+triage surface, not an automatic claim of maliciousness or attribution.
 
 ## Function and ABI evidence
 
@@ -211,10 +233,11 @@ therefore does not invent a total order that its sources cannot prove.
 |---|---|
 | `case.json` | Canonical schema, limits, coverage, contexts, complete source cases, entities, edges, timeline, and warnings |
 | `report.md` | Executive summary, scope, candidate phases, chronology, asset ledger, selector inventory, proxy context, entities, and gaps |
+| `core_path.csv` | Seed plus directly linked one-hop candidates for compact analyst triage |
 | `transactions.csv` | One row per reconstructed transaction with phase, hop, score, and discovery reasons |
-| `calls.csv` | One row per execution frame with selector, signature, source, confidence, and error evidence |
+| `calls.csv` | One row per execution frame with selector, signature, source, confidence, error evidence, and final-effect classification |
 | `events.csv` | One row per receipt event with topics, payload evidence, verified ABI source, and decoded arguments |
-| `transfers.csv` | Typed asset flow with token metadata, raw amount, display amount, token ID, and evidence reference |
+| `transfers.csv` | Typed asset evidence with token metadata, amount, evidence reference, and committed/reverted/unknown final effect |
 | `state_changes.csv` | Changed account balances, nonces, and code evidence before and after execution |
 | `storage_changes.csv` | Changed contract storage slots with explicit pre/post values |
 | `entities.csv` | Address kind, label, roles, first/last block, and transaction membership |
@@ -235,9 +258,13 @@ Every case records:
 - requested start and end block;
 - observed chain head;
 - addresses queried;
+- frontier addresses discovered;
 - history records considered;
 - candidate transactions;
+- candidates not reconstructed;
 - successful and failed reconstructions;
+- reconstructed block span and compact core-path size;
+- high-fanout hubs and history records suppressed from expansion;
 - address and transaction limit state;
 - history source adapters;
 - trace availability for each transaction;
@@ -257,6 +284,9 @@ inside a centralized service, or in unavailable provider data.
 | Reconstructed transactions | 100 | 2,000 |
 | Frontier addresses | 64 | 2,000 |
 | History records per address | 200 | 5,000 |
+| Hub detection records | 64 | 5,000 |
+| Hub detection counterparties | 32 | 5,000 |
+| Candidate transactions retained per hub | 12 | 500 |
 | Call frames per transaction | 2,000 | 2,000 |
 | Calldata retained per call frame | 16,384 bytes | 16,384 bytes |
 | Receipt logs per transaction | 5,000 | 5,000 |
@@ -281,6 +311,12 @@ Minimum operation requires standard transaction, receipt, block, code, storage, 
 Geth `prestateTracer` diff mode. Indexed cross-transaction history and verified function/event ABI
 evidence benefit from Etherscan V2 support for the selected chain.
 
+The engine does not require a paid indexer. Standard RPC fallback is available for bounded
+windows, and a free Etherscan V2 key can accelerate supported-chain address history. Provider
+quotas affect runtime and breadth per run; they do not change committed-versus-reverted semantics
+or artifact integrity. State CSV files are empty when compatible diff-mode evidence is
+unavailable, which is reported as missing coverage rather than interpreted as no state change.
+
 When a trace, ABI, archive state, proxy probe, token metadata call, or indexed history action is
 unavailable, the engine preserves available evidence and records the gap. It never silently
 converts missing evidence into a successful conclusion.
@@ -295,3 +331,29 @@ ledger, outside the requested window, or unavailable from the configured provide
 Analyst conclusions should cite transaction hashes, blocks, calls, logs, source adapters, and
 bundle hashes. Candidate relevance, address co-occurrence, or transfer direction alone must not be
 presented as proof of identity, ownership, or intent.
+
+For zero-knowledge and privacy protocols, only public evidence can be reconstructed: verifier
+calls, bridge activity, commitments, nullifiers, public inputs, and transparent endpoints exposed
+by the protocol. Shielded sender, recipient, amount, or memo data cannot be recovered when it was
+not published. Non-EVM systems such as Zcash require a dedicated chain adapter; authorized viewing
+data would be a separate evidence source rather than a result inferred from the public ledger.
+
+## Standards and primary references
+
+The evidence model and provider semantics are grounded in primary specifications and official
+guidance:
+
+- [Geth built-in tracers](https://geth.ethereum.org/docs/developers/evm-tracing/built-in-tracers)
+  define `callTracer` and `prestateTracer` output, including diff-mode state evidence;
+- [Solidity error handling](https://docs.soliditylang.org/en/latest/control-structures.html#error-handling-assert-require-revert-and-exceptions)
+  defines rollback behavior used to separate committed effects from reverted attempts;
+- [Etherscan API V2](https://docs.etherscan.io/introduction) and its
+  [rate limits](https://docs.etherscan.io/resources/rate-limits) define indexed-chain coverage and
+  free-tier request budgets;
+- [NIST SP 800-61r3](https://csrc.nist.gov/pubs/sp/800/61/r3/final) and
+  [NIST SP 800-86](https://csrc.nist.gov/pubs/sp/800/86/final) inform incident-response and
+  forensic-integrity practices;
+- [OASIS STIX 2.1](https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html) is the planned
+  interoperability target for machine-readable threat-intelligence exchange;
+- [Zcash address and viewing-key documentation](https://zcash.readthedocs.io/en/latest/rtd_pages/addresses.html)
+  defines the public-data boundary for shielded evidence.

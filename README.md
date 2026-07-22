@@ -1,6 +1,6 @@
-# White Radar
+# WhiteRadar Incident
 
-White Radar is a transaction-centric incident reconstruction engine for EVM networks. Given one
+WhiteRadar Incident is a transaction-centric incident reconstruction engine for EVM networks. Given one
 confirmed seed transaction from any observed point in a suspected incident, it searches a bounded
 window before and after that seed, reconstructs related transactions, and combines execution,
 asset movement, contract relationships, proxy context, and evidence provenance into one portable
@@ -27,17 +27,21 @@ command:
 1. reconstructs the seed transaction from its transaction, receipt, block, trace, logs, verified
    ABI, decoded events, pre/post account and storage changes, proxy state, and historical replay
    evidence;
-2. derives an initial frontier from the origin and observed transfer endpoints;
+2. derives an initial frontier from the origin, top-level destination, and committed transfer
+   endpoints;
 3. queries bounded normal, internal, ERC-20, ERC-721, and ERC-1155 history through Etherscan V2
    when configured, with a portable JSON-RPC block/log fallback;
 4. ranks related transaction candidates by observed direction, transfer type, value, and distance
    from the seed;
 5. reconstructs each selected transaction with the same per-transaction evidence pipeline;
-6. expands linked addresses for a bounded number of hops while deduplicating addresses,
-   transactions, and cycles;
-7. resolves token name, symbol, and decimals at each transaction block when the contract exposes
+6. detects high-fanout service/router hubs, retains their evidence, and bounds their expansion so
+   shared infrastructure does not consume the entire transaction budget;
+7. expands committed transfer counterparties for a bounded number of hops while deduplicating
+   addresses, transactions, and cycles;
+8. resolves token name, symbol, and decimals at each transaction block when the contract exposes
    them;
-8. produces a chronological candidate incident chain with explicit discovery reasons, source
+9. produces both a compact direct-evidence candidate path and a complete bounded candidate graph
+   with explicit discovery reasons, source
    provenance, coverage limits, warnings, and integrity hashes.
 
 The default destination is `evidence/<chain>-<transaction-prefix>-reconstruction/`.
@@ -48,10 +52,11 @@ The default destination is `evidence/<chain>-<transaction-prefix>-reconstruction
 |---|---|
 | `case.json` | Canonical machine-readable reconstruction, source cases, limits, coverage, warnings, and provenance |
 | `report.md` | Human-readable executive summary, chronology, asset ledger, selector inventory, proxy context, entities, and evidence gaps |
+| `core_path.csv` | Seed plus direct one-hop candidates for compact analyst triage |
 | `transactions.csv` | Seed, pre-seed, same-block, and post-seed transaction inventory with inclusion reasons |
 | `calls.csv` | Bounded execution-frame inventory across every reconstructed transaction |
 | `events.csv` | Receipt topics, bounded payloads, hashes, and verified-ABI event arguments |
-| `transfers.csv` | Native and standard token movement with raw and normalized amounts |
+| `transfers.csv` | Native and standard token evidence with raw/normalized amounts and committed, reverted-attempt, or unknown final-effect classification |
 | `state_changes.csv` | Pre/post balances, nonces, and runtime-code evidence for changed accounts |
 | `storage_changes.csv` | Pre/post values for changed contract storage slots |
 | `entities.csv` | Addresses, inferred kinds, labels, observed roles, and transaction membership |
@@ -149,12 +154,17 @@ Useful controls:
 - `--no-replay` skips the historical `eth_call` at block minus one;
 - `--backward-blocks` and `--forward-blocks` set the search window around the seed;
 - `--max-hops`, `--max-transactions`, and `--max-addresses` bound graph expansion;
+- `--hub-min-records`, `--hub-min-counterparties`, and `--max-hub-candidates` tune
+  high-fanout infrastructure suppression without discarding the recorded evidence;
 - `--history-source auto|etherscan|rpc` chooses indexed discovery, portable RPC discovery, or
   automatic fallback;
 - `--single-transaction` disables expansion and preserves the original one-transaction workflow;
 - `--overwrite` replaces only White Radar's known files in an existing case directory.
 
-The RPC history fallback scans only the requested bounded window. Large windows are intentionally
+No paid service is required. The RPC history fallback scans only the requested bounded window.
+When a free Etherscan V2 key is configured, the engine caches bounded address-history results and
+stays within explicit reconstruction budgets; paid quota increases throughput, not evidentiary
+correctness. Large windows are intentionally
 expensive and should use an indexed history source. Every report records the actual source,
 requested window, number of addresses queried, records considered, candidates, failures, and
 whether a configured cap was reached.
@@ -186,6 +196,8 @@ reconstructs a known transaction, while the guard observes only configured proto
 - bounded pre-seed, same-block, seed, and post-seed transaction phases;
 - normal transactions, internal value records, and standard token-transfer history;
 - deterministic candidate scoring and a recorded reason for every included transaction;
+- non-saturating relevance scores and a compact direct-evidence core path;
+- high-fanout hub detection with explicit suppression counters rather than silent evidence loss;
 - bounded multi-hop address expansion with cycle and transaction deduplication;
 - transaction/address graph edges tied to a source transaction and evidence reference;
 - explicit coverage classification and warnings rather than an unsupported claim of completeness.
@@ -212,6 +224,7 @@ reconstructs a known transaction, while the guard observes only configured proto
 ### Asset movement
 
 - native value from call frames, with top-level fallback when tracing is unavailable;
+- explicit separation of committed native value from reverted call-tree attempts;
 - ERC-20 `Transfer` log amounts;
 - ERC-721 `Transfer` token identifiers;
 - ERC-1155 `TransferSingle` and bounded `TransferBatch` identifiers and amounts;
@@ -235,6 +248,13 @@ ledger does not, by itself, prove human identity, intent, common control, or tha
 latest discovered transactions are the true incident boundaries. Mixer semantics, exchange
 internal ledgers, privacy systems, off-chain actions, unsupported bridges, unavailable archive
 state, provider pruning, and service-address fan-out can create unresolved gaps.
+
+For zero-knowledge and privacy systems, the engine can analyze only public evidence exposed by the
+chain or a protocol-specific adapter: public verifier calls, bridge transactions, commitments,
+nullifiers, and disclosed public inputs. It cannot recover shielded sender, recipient, or amount
+data that the protocol deliberately does not publish. Zcash is not EVM-compatible and would
+require a separate chain adapter; shielded-pool attribution additionally requires authorized
+viewing data.
 
 The report therefore distinguishes observed evidence from candidate linkage and records every
 limit and source gap. Bridge-aware cross-chain continuation, service/router classification,

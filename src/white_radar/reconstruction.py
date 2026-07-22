@@ -4,9 +4,14 @@ import dataclasses
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from white_radar import __version__
 from white_radar.abi import AbiResolver
 from white_radar.history import ZERO_ADDRESS, HistoryRecord, HistorySource, HistorySourceError
-from white_radar.investigation import InvestigationCase, investigate_transaction
+from white_radar.investigation import (
+    EXECUTION_COMMITTED,
+    InvestigationCase,
+    investigate_transaction,
+)
 from white_radar.models import ChainConfig, utc_now
 from white_radar.rpc import JsonRpcClient, RpcError
 from white_radar.token_metadata import TokenMetadataResolver
@@ -23,6 +28,9 @@ class ReconstructionLimits:
     max_transactions: int = 100
     max_frontier_addresses: int = 64
     history_records_per_address: int = 200
+    hub_min_records: int = 64
+    hub_min_counterparties: int = 32
+    max_hub_candidate_transactions: int = 12
 
     def __post_init__(self) -> None:
         bounds = {
@@ -32,6 +40,13 @@ class ReconstructionLimits:
             "max_transactions": (self.max_transactions, 1, 2_000),
             "max_frontier_addresses": (self.max_frontier_addresses, 1, 2_000),
             "history_records_per_address": (self.history_records_per_address, 1, 5_000),
+            "hub_min_records": (self.hub_min_records, 2, 5_000),
+            "hub_min_counterparties": (self.hub_min_counterparties, 2, 5_000),
+            "max_hub_candidate_transactions": (
+                self.max_hub_candidate_transactions,
+                1,
+                500,
+            ),
         }
         for name, (value, minimum, maximum) in bounds.items():
             if not minimum <= value <= maximum:
@@ -65,6 +80,8 @@ class TransactionContext:
     state_account_change_count: int
     storage_change_count: int
     trace_available: bool
+    core_candidate: bool = False
+    core_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -103,6 +120,7 @@ class ReconstructionEdge:
     raw_amount: str | None
     amount_display: str | None
     evidence_ref: str
+    execution_effect: str
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -140,6 +158,13 @@ class ReconstructionCoverage:
     transaction_limit_reached: bool
     address_limit_reached: bool
     history_sources: tuple[str, ...]
+    frontier_addresses_discovered: int
+    candidate_transactions_not_reconstructed: int
+    reconstructed_start_block: int
+    reconstructed_end_block: int
+    core_transactions: int
+    hub_addresses_detected: tuple[str, ...]
+    hub_history_records_suppressed: int
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -150,6 +175,8 @@ class AttackReconstruction:
     schema_version: int
     reconstruction_id: str
     generated_at: str
+    tool_name: str
+    tool_version: str
     chain: str
     chain_id: int
     explorer_url: str
@@ -169,6 +196,8 @@ class AttackReconstruction:
             "schema_version": self.schema_version,
             "reconstruction_id": self.reconstruction_id,
             "generated_at": self.generated_at,
+            "tool_name": self.tool_name,
+            "tool_version": self.tool_version,
             "chain": self.chain,
             "chain_id": self.chain_id,
             "explorer_url": self.explorer_url,
@@ -193,6 +222,8 @@ class _Candidate:
     score: int = 0
     reasons: set[str] = dataclasses.field(default_factory=set)
     records: list[tuple[str, HistoryRecord]] = dataclasses.field(default_factory=list)
+    hub_sources: set[str] = dataclasses.field(default_factory=set)
+    non_hub_sources: set[str] = dataclasses.field(default_factory=set)
 
 
 def _source_transaction_address(case: InvestigationCase, field: str) -> str | None:
@@ -209,6 +240,8 @@ def _seed_frontier(case: InvestigationCase) -> dict[str, int]:
     if target and target != ZERO_ADDRESS:
         selected[target] = 0
     for transfer in case.transfers:
+        if transfer.execution_effect != EXECUTION_COMMITTED:
+            continue
         if transfer.sender != ZERO_ADDRESS:
             selected[transfer.sender] = 0
         if transfer.recipient != ZERO_ADDRESS:
@@ -226,20 +259,67 @@ def _record_reason(address: str, record: HistoryRecord) -> tuple[str, str | None
 
 def _record_score(record: HistoryRecord, *, address: str, seed_block: int) -> int:
     base = {
-        "internal": 95,
-        "erc20": 90,
-        "erc721": 90,
-        "erc1155": 90,
-        "normal": 55,
-    }.get(record.record_type, 40)
+        "internal": 150,
+        "erc20": 135,
+        "erc721": 135,
+        "erc1155": 135,
+        "normal": 85,
+    }.get(record.record_type, 60)
     if record.value not in {None, "", "0"}:
-        base += 10
+        base += 18
     if (record.block_number < seed_block and record.recipient == address) or (
         record.block_number > seed_block and record.sender == address
     ):
-        base += 15
+        base += 30
     distance = abs(record.block_number - seed_block)
-    return base + max(0, 20 - min(20, distance))
+    return base + max(0, 48 - min(48, distance))
+
+
+def _candidate_rank(candidate: _Candidate) -> int:
+    diversity = min(8, len(candidate.reasons)) * 7
+    hub_penalty = 55 if candidate.hub_sources and not candidate.non_hub_sources else 0
+    return max(0, candidate.score + diversity - hub_penalty)
+
+
+def _record_counterparties(address: str, records: tuple[HistoryRecord, ...]) -> set[str]:
+    counterparties: set[str] = set()
+    for record in records:
+        if record.sender == address and record.recipient and record.recipient != ZERO_ADDRESS:
+            counterparties.add(record.recipient)
+        elif record.recipient == address and record.sender and record.sender != ZERO_ADDRESS:
+            counterparties.add(record.sender)
+    return counterparties
+
+
+def _bounded_hub_records(
+    records: tuple[HistoryRecord, ...],
+    *,
+    address: str,
+    seed_block: int,
+    max_transactions: int,
+) -> tuple[tuple[HistoryRecord, ...], int]:
+    transaction_scores: dict[str, int] = {}
+    transaction_blocks: dict[str, int] = {}
+    for record in records:
+        transaction_scores[record.transaction_hash] = max(
+            transaction_scores.get(record.transaction_hash, 0),
+            _record_score(record, address=address, seed_block=seed_block),
+        )
+        transaction_blocks.setdefault(record.transaction_hash, record.block_number)
+    selected_hashes = {
+        transaction_hash
+        for transaction_hash, _score in sorted(
+            transaction_scores.items(),
+            key=lambda item: (
+                -item[1],
+                abs(transaction_blocks[item[0]] - seed_block),
+                transaction_blocks[item[0]],
+                item[0],
+            ),
+        )[:max_transactions]
+    }
+    selected = tuple(record for record in records if record.transaction_hash in selected_hashes)
+    return selected, len(records) - len(selected)
 
 
 def _phase(block_number: int, seed_block: int, tx_hash: str, seed_hash: str) -> str:
@@ -281,7 +361,7 @@ def _context(
         block_timestamp=case.block_timestamp,
         phase=_phase(case.block_number, seed_block, case.transaction_hash, seed_hash),
         hop=hop,
-        relevance_score=max(0, min(100, score)),
+        relevance_score=max(0, score),
         discovery_reasons=reasons,
         status=case.transaction_status,
         sender=sender,
@@ -298,6 +378,28 @@ def _context(
         storage_change_count=case.state_diff.storage_change_count if case.state_diff else 0,
         trace_available=case.trace_available,
     )
+
+
+def _mark_core_contexts(
+    contexts: dict[str, TransactionContext], seed_hash: str
+) -> dict[str, TransactionContext]:
+    """Mark the compact, one-evidence-hop path without claiming attribution or intent."""
+
+    marked: dict[str, TransactionContext] = {}
+    for transaction_hash, context in contexts.items():
+        reasons: tuple[str, ...]
+        if transaction_hash == seed_hash:
+            reasons = ("operator_seed",)
+        elif context.hop == 1:
+            reasons = ("direct_seed_entity_history",)
+        else:
+            reasons = ()
+        marked[transaction_hash] = dataclasses.replace(
+            context,
+            core_candidate=bool(reasons),
+            core_reasons=reasons,
+        )
+    return marked
 
 
 def _aggregate_entities(
@@ -337,9 +439,7 @@ def _aggregate_entities(
             transaction_hashes=tuple(sorted(transactions[address])),
             first_block=min(blocks[address]),
             last_block=max(blocks[address]),
-            code_observed=(
-                any(code_observations[address]) if code_observations[address] else None
-            ),
+            code_observed=(any(code_observations[address]) if code_observations[address] else None),
             code_bytes_min=(min(code_sizes[address]) if code_sizes[address] else None),
             code_bytes_max=(max(code_sizes[address]) if code_sizes[address] else None),
             runtime_code_sha256s=tuple(sorted(code_hashes[address])),
@@ -370,6 +470,7 @@ def _aggregate_edges(
                     raw_amount=relation.amount,
                     amount_display=relation.amount_display,
                     evidence_ref=f"{case.transaction_hash}:{relation.evidence_ref}",
+                    execution_effect=relation.execution_effect,
                 )
             )
     return tuple(
@@ -449,7 +550,7 @@ def reconstruct_attack_case(
             seed_hash=seed.transaction_hash,
             seed_block=seed.block_number,
             hop=0,
-            score=100,
+            score=10_000,
             reasons=("operator_seed",),
         )
     }
@@ -459,6 +560,9 @@ def reconstruct_attack_case(
     history_records_considered = 0
     failures = 0
     address_limit_reached = False
+    hub_addresses: set[str] = set()
+    hub_history_records_suppressed = 0
+    history_sources_seen: set[str] = set()
 
     for hop in range(active_limits.max_hops):
         frontier = sorted(
@@ -486,7 +590,23 @@ def reconstruct_attack_case(
                 warnings.append(f"History lookup failed for {address}: {exc}")
                 continue
             history_records_considered += len(records)
-            for record in records:
+            history_sources_seen.update(record.source for record in records)
+            counterparties = _record_counterparties(address, records)
+            is_hub = (
+                len(records) >= active_limits.hub_min_records
+                and len(counterparties) >= active_limits.hub_min_counterparties
+            )
+            selected_records = records
+            if is_hub:
+                hub_addresses.add(address)
+                selected_records, suppressed = _bounded_hub_records(
+                    records,
+                    address=address,
+                    seed_block=seed.block_number,
+                    max_transactions=active_limits.max_hub_candidate_transactions,
+                )
+                hub_history_records_suppressed += suppressed
+            for record in selected_records:
                 if record.transaction_hash == seed.transaction_hash:
                     continue
                 candidate = candidates.setdefault(
@@ -495,6 +615,11 @@ def reconstruct_attack_case(
                 )
                 reason, _counterpart = _record_reason(address, record)
                 candidate.reasons.add(reason)
+                if is_hub:
+                    candidate.reasons.add(f"hub_bounded:{address}")
+                    candidate.hub_sources.add(address)
+                else:
+                    candidate.non_hub_sources.add(address)
                 candidate.records.append((address, record))
                 candidate.score = max(
                     candidate.score,
@@ -511,14 +636,15 @@ def reconstruct_attack_case(
         ]
         available.sort(
             key=lambda item: (
-                -item.score,
+                -_candidate_rank(item),
                 abs(item.block_number - seed.block_number),
                 item.block_number,
                 item.transaction_hash,
             )
         )
-        remaining = active_limits.max_transactions - len(cases)
-        for candidate in available[: max(0, remaining)]:
+        for candidate in available:
+            if len(cases) >= active_limits.max_transactions:
+                break
             try:
                 related = investigate_transaction(
                     rpc,
@@ -545,10 +671,12 @@ def reconstruct_attack_case(
                 seed_hash=seed.transaction_hash,
                 seed_block=seed.block_number,
                 hop=candidate.hop,
-                score=candidate.score,
+                score=_candidate_rank(candidate),
                 reasons=tuple(sorted(candidate.reasons)),
             )
             if candidate.hop >= active_limits.max_hops:
+                continue
+            if candidate.hub_sources and not candidate.non_hub_sources:
                 continue
             next_hop = candidate.hop
             linked_addresses = {address for address, _record in candidate.records}
@@ -557,6 +685,8 @@ def reconstruct_attack_case(
                 if counterpart and counterpart != ZERO_ADDRESS:
                     linked_addresses.add(counterpart)
             for transfer in related.transfers:
+                if transfer.execution_effect != EXECUTION_COMMITTED:
+                    continue
                 if transfer.sender in linked_addresses and transfer.recipient != ZERO_ADDRESS:
                     linked_addresses.add(transfer.recipient)
                 if transfer.recipient in linked_addresses and transfer.sender != ZERO_ADDRESS:
@@ -574,6 +704,7 @@ def reconstruct_attack_case(
             break
 
     warnings.extend(history.warnings)
+    contexts = _mark_core_contexts(contexts, seed.transaction_hash)
     ordered_cases = tuple(
         sorted(
             cases.values(),
@@ -585,18 +716,14 @@ def reconstruct_attack_case(
         )
     )
     ordered_contexts = tuple(contexts[item.transaction_hash] for item in ordered_cases)
-    history_sources = tuple(
-        sorted(
-            {
-                record.source
-                for candidate in candidates.values()
-                for _address_value, record in candidate.records
-            }
-        )
-    )
+    history_sources = tuple(sorted(history_sources_seen))
     transaction_limit_reached = len(cases) >= active_limits.max_transactions and any(
         candidate.transaction_hash not in cases for candidate in candidates.values()
     )
+    candidates_not_reconstructed = sum(
+        candidate.transaction_hash not in cases for candidate in candidates.values()
+    )
+    core_transactions = sum(item.core_candidate for item in ordered_contexts)
     coverage = ReconstructionCoverage(
         boundary_status="bounded_candidate_chain",
         requested_start_block=start_block,
@@ -610,6 +737,13 @@ def reconstruct_attack_case(
         transaction_limit_reached=transaction_limit_reached,
         address_limit_reached=address_limit_reached,
         history_sources=history_sources,
+        frontier_addresses_discovered=len(address_hops),
+        candidate_transactions_not_reconstructed=candidates_not_reconstructed,
+        reconstructed_start_block=min(item.block_number for item in ordered_cases),
+        reconstructed_end_block=max(item.block_number for item in ordered_cases),
+        core_transactions=core_transactions,
+        hub_addresses_detected=tuple(sorted(hub_addresses)),
+        hub_history_records_suppressed=hub_history_records_suppressed,
     )
     if coverage.transaction_limit_reached:
         warnings.append(
@@ -617,14 +751,22 @@ def reconstruct_attack_case(
         )
     if coverage.address_limit_reached:
         warnings.append("The frontier-address cap was reached; graph expansion is incomplete.")
+    if coverage.hub_addresses_detected:
+        warnings.append(
+            f"High-fanout expansion was bounded for {len(coverage.hub_addresses_detected)} "
+            "hub address(es); their retained evidence remains in the case, while low-signal "
+            "fan-out candidates were not expanded."
+        )
     warnings.append(
         "The reconstructed boundary is evidence-backed but bounded; it is not proof that the "
         "earliest or final incident transaction has been identified."
     )
     return AttackReconstruction(
-        schema_version=2,
+        schema_version=3,
         reconstruction_id=f"{chain.name}-{seed.transaction_hash[2:18]}-reconstruction",
         generated_at=utc_now(),
+        tool_name="WhiteRadar Incident",
+        tool_version=__version__,
         chain=chain.name,
         chain_id=chain.chain_id,
         explorer_url=chain.explorer_url,

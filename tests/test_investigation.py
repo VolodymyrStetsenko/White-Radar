@@ -189,6 +189,8 @@ class InvestigationTests(unittest.TestCase):
             [item.amount for item in case.transfers if item.asset_type == "native"],
             ["10", "5"],
         )
+        self.assertTrue(all(item.execution_effect == "committed" for item in case.transfers))
+        self.assertTrue(all(item.execution_effect == "committed" for item in case.calls))
         delegate_edge = next(item for item in case.relationships if item.relation == "DELEGATECALL")
         self.assertIsNone(delegate_edge.amount)
         self.assertEqual(case.transfers[-1].amount, "1000")
@@ -233,6 +235,79 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(case.transfers[0].evidence_ref, "transaction")
         self.assertEqual(case.transfers[0].source, "transaction")
         self.assertTrue(any("Call tracing is unavailable" in item for item in case.warnings))
+
+    def test_reverted_transaction_keeps_attempts_out_of_committed_flow(self) -> None:
+        class RevertedRpc(InvestigationRpc):
+            def receipt(self, tx_hash: str) -> dict[str, Any] | None:
+                receipt = super().receipt(tx_hash)
+                assert receipt is not None
+                receipt["status"] = "0x0"
+                receipt["logs"] = []
+                return receipt
+
+        case = investigate_transaction(
+            RevertedRpc(),  # type: ignore[arg-type]
+            ETHEREUM,
+            TX_HASH,
+            replay_prestate=False,
+        )
+        self.assertEqual(case.transaction_status, "reverted")
+        self.assertTrue(case.transfers)
+        self.assertTrue(
+            all(item.execution_effect == "attempted_reverted" for item in case.transfers)
+        )
+        self.assertTrue(all(item.execution_effect == "attempted_reverted" for item in case.calls))
+        self.assertIn("attempted_reverted_asset_flow", {item.code for item in case.findings})
+        self.assertNotIn("native_asset_flow", {item.code for item in case.findings})
+
+    def test_failed_subcall_marks_its_entire_subtree_as_attempted(self) -> None:
+        class CaughtFailureRpc(InvestigationRpc):
+            def trace_transaction(self, tx_hash: str) -> dict[str, Any]:
+                return {
+                    "type": "CALL",
+                    "from": ORIGIN,
+                    "to": TARGET,
+                    "input": "0x",
+                    "value": "0xa",
+                    "calls": [
+                        {
+                            "type": "CALL",
+                            "from": TARGET,
+                            "to": IMPLEMENTATION,
+                            "input": "0x",
+                            "value": "0x7",
+                            "error": "execution reverted",
+                            "calls": [
+                                {
+                                    "type": "CALL",
+                                    "from": IMPLEMENTATION,
+                                    "to": RECIPIENT,
+                                    "input": "0x",
+                                    "value": "0x3",
+                                }
+                            ],
+                        },
+                        {
+                            "type": "CALL",
+                            "from": TARGET,
+                            "to": RECIPIENT,
+                            "input": "0x",
+                            "value": "0x4",
+                        },
+                    ],
+                }
+
+        case = investigate_transaction(
+            CaughtFailureRpc(),  # type: ignore[arg-type]
+            ETHEREUM,
+            TX_HASH,
+            replay_prestate=False,
+        )
+        effects = {item.path: item.execution_effect for item in case.calls}
+        self.assertEqual(effects["0"], "committed")
+        self.assertEqual(effects["0.0"], "attempted_reverted")
+        self.assertEqual(effects["0.0.0"], "attempted_reverted")
+        self.assertEqual(effects["0.1"], "committed")
 
     def test_decodes_erc721_and_erc1155_transfer_logs(self) -> None:
         def word(value: int) -> str:
@@ -363,7 +438,7 @@ class InvestigationTests(unittest.TestCase):
             result = write_case_bundle(case, destination)
             self.assertEqual({item.name for item in result.files}, set(BUNDLE_FILES))
             manifest = json.loads(result.manifest.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 3)
             for item in manifest["files"]:
                 path = destination / item["path"]
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), item["sha256"])

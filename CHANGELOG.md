@@ -4,6 +4,18 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- renamed the investigation product surface to `WhiteRadar Incident` while preserving the
+  `white-radar` CLI for compatibility;
+- classified call frames, transfer evidence, graph edges, and CSV exports as committed,
+  attempted/reverted, or unknown so reverted native value is never reported as final fund flow;
+- added `core_path.csv` and a compact direct-evidence report section ahead of the complete bounded
+  candidate graph;
+- added high-fanout hub detection, bounded hub candidate retention, non-saturating linkage scores,
+  and explicit hub-suppression coverage counters;
+- preserved source provenance for suppressed hub records and continued candidate reconstruction
+  after individual RPC failures until the configured transaction budget is filled;
+- added tool-version provenance to canonical reconstruction records and integrity manifests;
+- added regression tests for top-level reverts, caught failed-call subtrees, and hub fan-out;
 - added bounded Geth `prestateTracer` diff-mode account, balance, nonce, code, and storage-change
   evidence with provider degradation and explicit truncation records;
 - added verified-ABI receipt-event decoding, including indexed dynamic-value hashes and bounded

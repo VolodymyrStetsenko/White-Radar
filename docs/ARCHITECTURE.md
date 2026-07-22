@@ -2,7 +2,7 @@
 
 ## Design properties
 
-White Radar is built around eight engineering properties:
+WhiteRadar Incident is built around nine engineering properties:
 
 1. the network boundary is read-only;
 2. every analysis result identifies its chain and, where applicable, its pinned block;
@@ -76,31 +76,37 @@ returned directly because it may be part of the evidence.
 3. Cross-check the transaction, receipt, and containing-block identities before combining them.
 4. Request an exact mined `callTracer` trace when supported.
 5. Flatten nested calls into stable bounded paths and resolve verified selectors.
-6. Decode native value and standard ERC-20, ERC-721, and ERC-1155 transfer evidence.
-7. Inspect root proxy state and resolve implementation ABI context at the transaction block.
-8. Classify entities from historical runtime code and observed roles.
-9. Build evidence-referenced relationships, findings, and separate execution/asset timelines.
-10. Optionally corroborate the result with `eth_call` at transaction block minus one.
+6. Classify each call subtree and transfer as committed, attempted/reverted, or unknown.
+7. Decode native value and standard ERC-20, ERC-721, and ERC-1155 transfer evidence without
+   treating reverted native-value attempts as final movement.
+8. Inspect root proxy state and resolve implementation ABI context at the transaction block.
+9. Classify entities from historical runtime code and observed roles.
+10. Build evidence-referenced relationships, findings, and separate execution/asset timelines.
+11. Optionally corroborate the result with `eth_call` at transaction block minus one.
 
 This pipeline is reusable for the seed and every selected related transaction.
 
 ## Cross-transaction expansion pipeline
 
-1. Derive a frontier from the seed origin and non-zero asset-transfer endpoints.
+1. Derive a frontier from the seed origin, top-level destination, and committed non-zero
+   asset-transfer endpoints.
 2. Compute an explicit backward/forward block window bounded by the observed chain head.
 3. Query normal, internal, ERC-20, ERC-721, and ERC-1155 history through an indexed adapter.
 4. Fall back to bounded full-block and standard transfer-log scanning when indexed history is
    unavailable.
 5. Normalize history records with transaction, block, endpoints, asset, amount, source, and type.
-6. Score candidates deterministically by evidence type, value, direction relative to the seed,
-   and block distance.
-7. Reconstruct selected candidates with the per-transaction pipeline.
-8. Add evidence-linked counterparties to the next frontier within configured hop and address
+6. Detect high-fanout hubs from bounded record and unique-counterparty counts, retain their
+   evidence, and cap hub candidate fan-out.
+7. Score candidates deterministically without score saturation by evidence type, value,
+   direction relative to the seed, source diversity, hub provenance, and block distance.
+8. Reconstruct selected candidates with the per-transaction pipeline.
+9. Add counterparties from committed transfers to the next frontier within configured hop and address
    limits.
-9. Deduplicate addresses, transactions, and graph cycles.
-10. Aggregate transaction phases, call/asset edges, token metadata, entities, proxy snapshots,
+10. Deduplicate addresses, transactions, and graph cycles.
+11. Mark a compact core candidate path containing the seed and direct one-hop evidence.
+12. Aggregate transaction phases, call/asset edges, token metadata, entities, proxy snapshots,
     timeline entries, warnings, and coverage counters.
-11. Write canonical JSON, CSV tables, Markdown, interactive HTML, GraphML, and a SHA-256 manifest.
+13. Write canonical JSON, CSV tables, Markdown, interactive HTML, GraphML, and a SHA-256 manifest.
 
 The expansion result is classified as a bounded candidate chain. It cannot claim that a source
 adapter proves the true first or final incident transaction, identity, ownership, or intent.

@@ -30,7 +30,12 @@ from white_radar.history import (
     HistorySource,
     RpcWindowHistorySource,
 )
-from white_radar.investigation import investigate_transaction, validate_transaction_hash
+from white_radar.investigation import (
+    EXECUTION_ATTEMPTED_REVERTED,
+    EXECUTION_COMMITTED,
+    investigate_transaction,
+    validate_transaction_hash,
+)
 from white_radar.logging import configure_logging, log_context
 from white_radar.mempool import watch_pending_transactions
 from white_radar.models import ChainConfig, IncidentStatus, RadarEvent
@@ -142,6 +147,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=200,
         help="Maximum indexed history records retained per address (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--hub-min-records",
+        type=int,
+        default=64,
+        help="History-record threshold for high-fanout hub detection (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--hub-min-counterparties",
+        type=int,
+        default=32,
+        help="Unique-counterparty threshold for hub detection (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--max-hub-candidates",
+        type=int,
+        default=12,
+        help="Maximum candidate transactions retained per detected hub (default: %(default)s).",
     )
     investigate.add_argument(
         "--history-source",
@@ -706,9 +729,16 @@ def cmd_investigate(
             bundle = write_case_bundle(case, destination, overwrite=overwrite)
         except FileExistsError as exc:
             raise ValueError(str(exc)) from exc
+        committed_transfers = sum(
+            item.execution_effect == EXECUTION_COMMITTED for item in case.transfers
+        )
+        reverted_transfer_attempts = sum(
+            item.execution_effect == EXECUTION_ATTEMPTED_REVERTED for item in case.transfers
+        )
         print(
             json.dumps(
                 {
+                    "tool": {"name": "WhiteRadar Incident", "version": __version__},
                     "case_id": case.case_id,
                     "mode": "single_transaction",
                     "transaction_hash": case.transaction_hash,
@@ -716,6 +746,8 @@ def cmd_investigate(
                     "calls": len(case.calls),
                     "events": len(case.events),
                     "transfers": len(case.transfers),
+                    "committed_transfers": committed_transfers,
+                    "reverted_transfer_attempts": reverted_transfer_attempts,
                     "state_accounts": len(case.state_diff.accounts) if case.state_diff else 0,
                     "entities": len(case.entities),
                     "findings": len(case.findings),
@@ -771,13 +803,29 @@ def cmd_investigate(
         bundle = write_reconstruction_bundle(reconstruction, destination, overwrite=overwrite)
     except FileExistsError as exc:
         raise ValueError(str(exc)) from exc
+    all_transfers = [
+        transfer for item in reconstruction.transactions for transfer in item.transfers
+    ]
+    committed_transfers = sum(
+        item.execution_effect == EXECUTION_COMMITTED for item in all_transfers
+    )
+    reverted_transfer_attempts = sum(
+        item.execution_effect == EXECUTION_ATTEMPTED_REVERTED for item in all_transfers
+    )
     print(
         json.dumps(
             {
+                "tool": {
+                    "name": reconstruction.tool_name,
+                    "version": reconstruction.tool_version,
+                },
                 "case_id": reconstruction.reconstruction_id,
                 "mode": "cross_transaction_reconstruction",
                 "seed_transaction_hash": reconstruction.seed_transaction_hash,
                 "transactions": len(reconstruction.transactions),
+                "core_transactions": reconstruction.coverage.core_transactions,
+                "committed_transfers": committed_transfers,
+                "reverted_transfer_attempts": reverted_transfer_attempts,
                 "relationships": len(reconstruction.edges),
                 "entities": len(reconstruction.entities),
                 "coverage": reconstruction.coverage.to_dict(),
@@ -896,6 +944,9 @@ def main(argv: list[str] | None = None) -> None:
                     max_transactions=args.max_transactions,
                     max_frontier_addresses=args.max_addresses,
                     history_records_per_address=args.history_records_per_address,
+                    hub_min_records=args.hub_min_records,
+                    hub_min_counterparties=args.hub_min_counterparties,
+                    max_hub_candidate_transactions=args.max_hub_candidates,
                 ),
                 history_source=args.history_source,
             )

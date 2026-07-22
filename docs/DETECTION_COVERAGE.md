@@ -1,6 +1,6 @@
 # Detection coverage
 
-White Radar is a transaction incident investigator with a quiet protocol guard. Coverage is
+WhiteRadar Incident is a transaction incident investigator with a quiet protocol guard. Coverage is
 expressed as reconstructable evidence and configured signals, not as a claim that one signal proves
 a vulnerability.
 

@@ -52,6 +52,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(investigation.backward_blocks, 256)
         self.assertEqual(investigation.forward_blocks, 512)
         self.assertEqual(investigation.max_hops, 3)
+        self.assertEqual(investigation.hub_min_records, 64)
+        self.assertEqual(investigation.hub_min_counterparties, 32)
+        self.assertEqual(investigation.max_hub_candidates, 12)
         self.assertEqual(investigation.history_source, "auto")
         without_state = parser.parse_args(
             [

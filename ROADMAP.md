@@ -2,7 +2,7 @@
 
 ## Product direction
 
-White Radar is developed as a transaction-centric EVM incident investigator with a quiet,
+WhiteRadar Incident is developed as a transaction-centric EVM incident investigator with a quiet,
 protocol-specific guard. Investigation depth and evidence quality take priority over broad,
 high-volume alert generation.
 
@@ -36,6 +36,9 @@ high-volume alert generation.
 - [x] self-contained graph search, node/relation filters, zoom/pan, fit, evidence details, and
   portable GraphML;
 - [x] Ethereum, Base, Arbitrum, OP Mainnet, Polygon, Sepolia, and Monad configuration templates.
+- [x] committed-versus-reverted call-tree and asset-flow semantics;
+- [x] compact seed-plus-one-hop core candidate path alongside the complete bounded graph;
+- [x] high-fanout hub detection, bounded expansion, and explicit suppression accounting.
 
 ## Highest-priority investigation work
 
@@ -47,8 +50,8 @@ high-volume alert generation.
   cross-transaction graph;
 - [x] maintain per-hop provenance and raw integer asset accounting without implying ownership or
   intent;
-- [ ] classify and suppress high-volume exchange routers and service-address fan-out without
-  hiding evidentiary transfers;
+- [x] detect and bound high-volume hub fan-out without hiding retained evidentiary transfers;
+- [ ] attach source-backed exchange, router, and service classifications to detected hubs;
 - [ ] checkpoint long investigations and resume deterministically;
 - [x] export a cross-transaction graph and per-asset flow ledger;
 - [ ] export analyst-selected branch slices and conservation summaries.

@@ -24,6 +24,7 @@ from white_radar.reconstruction_bundle import (
 )
 
 RELATED_HASH = "0x" + "bc" * 32
+MISSING_HASH = "0x" + "cd" * 32
 
 
 class ReconstructionRpc(InvestigationRpc):
@@ -116,9 +117,9 @@ class ReconstructionTests(unittest.TestCase):
         self.assertTrue(any("erc20:sent_by" in item for item in related.discovery_reasons))
         self.assertEqual(related.function_source, "fixture")
         self.assertEqual(related.decoded_arguments, {"amount": 7})
-        self.assertTrue(
-            all(edge.evidence_ref.startswith("0x") for edge in reconstruction.edges)
-        )
+        self.assertTrue(related.core_candidate)
+        self.assertGreater(related.relevance_score, 100)
+        self.assertTrue(all(edge.evidence_ref.startswith("0x") for edge in reconstruction.edges))
         self.assertEqual(reconstruction.coverage.boundary_status, "bounded_candidate_chain")
         self.assertFalse(reconstruction.coverage.transaction_limit_reached)
 
@@ -142,22 +143,172 @@ class ReconstructionTests(unittest.TestCase):
             result = write_reconstruction_bundle(reconstruction, root)
             self.assertEqual({item.name for item in result.files}, set(RECONSTRUCTION_BUNDLE_FILES))
             report = (root / "report.md").read_text(encoding="utf-8")
-            self.assertIn("Chronological transaction inventory", report)
-            self.assertIn("Asset-flow ledger", report)
+            self.assertIn("Complete chronological candidate inventory", report)
+            self.assertIn("Committed asset-flow ledger", report)
+            self.assertIn("High-signal core candidate path", report)
             graph = (root / "graph.html").read_text(encoding="utf-8")
             self.assertIn("Search address, transaction, label, selector", graph)
             self.assertIn("marker-end", graph)
             calls_csv = (root / "calls.csv").read_text(encoding="utf-8")
             self.assertIn("calldata_sha256", calls_csv.splitlines()[0])
             self.assertIn("decoded_arguments", calls_csv.splitlines()[0])
+            self.assertIn("execution_effect", calls_csv.splitlines()[0])
+            self.assertGreater(len((root / "core_path.csv").read_text().splitlines()), 1)
             ET.parse(root / "graph.graphml")
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(manifest["schema_version"], 4)
+            self.assertEqual(manifest["tool"]["name"], "WhiteRadar Incident")
             self.assertIn("events.csv", {item["path"] for item in manifest["files"]})
             self.assertIn("state_changes.csv", {item["path"] for item in manifest["files"]})
             for item in manifest["files"]:
                 path = root / item["path"]
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), item["sha256"])
+
+    def test_bounds_high_fanout_hub_without_losing_coverage_accounting(self) -> None:
+        class HubHistory:
+            @property
+            def warnings(self) -> tuple[str, ...]:
+                return ()
+
+            def records_for_address(
+                self,
+                *,
+                chain_id: int,
+                address: str,
+                start_block: int,
+                end_block: int,
+                anchor_block: int,
+                limit: int,
+            ) -> tuple[HistoryRecord, ...]:
+                del chain_id, start_block, end_block, anchor_block, limit
+                if address != ORIGIN:
+                    return ()
+                return tuple(
+                    HistoryRecord(
+                        transaction_hash="0x" + f"{index + 1:064x}",
+                        block_number=101 + index,
+                        transaction_index=index,
+                        timestamp=1_700_000_000 + index,
+                        sender=ORIGIN,
+                        recipient="0x" + f"{index + 100:040x}",
+                        record_type="erc20",
+                        value=str(1_000 + index),
+                        asset_address="0x" + "55" * 20,
+                        token_id=None,
+                        source="fixture:hub",
+                    )
+                    for index in range(10)
+                )
+
+        rpc = ReconstructionRpc()
+        seed = investigate_transaction(
+            rpc,  # type: ignore[arg-type]
+            ETHEREUM,
+            TX_HASH,
+            replay_prestate=False,
+        )
+        reconstruction = reconstruct_attack_case(
+            rpc,  # type: ignore[arg-type]
+            ETHEREUM,
+            seed,
+            HubHistory(),
+            limits=ReconstructionLimits(
+                max_hops=1,
+                max_transactions=20,
+                hub_min_records=4,
+                hub_min_counterparties=4,
+                max_hub_candidate_transactions=2,
+            ),
+        )
+        self.assertEqual(len(reconstruction.transactions), 3)
+        self.assertEqual(reconstruction.coverage.hub_addresses_detected, (ORIGIN,))
+        self.assertEqual(reconstruction.coverage.hub_history_records_suppressed, 8)
+        self.assertEqual(reconstruction.coverage.history_records_considered, 10)
+        self.assertTrue(
+            all(
+                any(reason.startswith("hub_bounded:") for reason in context.discovery_reasons)
+                for context in reconstruction.contexts
+                if context.transaction_hash != TX_HASH
+            )
+        )
+
+    def test_candidate_failure_does_not_leave_transaction_budget_unused(self) -> None:
+        class OneMissingRpc(ReconstructionRpc):
+            def transaction(self, tx_hash: str) -> dict[str, object] | None:
+                if tx_hash == MISSING_HASH:
+                    return None
+                return super().transaction(tx_hash)
+
+        class FailureHistory:
+            @property
+            def warnings(self) -> tuple[str, ...]:
+                return ()
+
+            def records_for_address(
+                self,
+                *,
+                chain_id: int,
+                address: str,
+                start_block: int,
+                end_block: int,
+                anchor_block: int,
+                limit: int,
+            ) -> tuple[HistoryRecord, ...]:
+                del chain_id, start_block, end_block, anchor_block, limit
+                if address != ORIGIN:
+                    return ()
+                return (
+                    HistoryRecord(
+                        transaction_hash=MISSING_HASH,
+                        block_number=101,
+                        transaction_index=1,
+                        timestamp=1_700_000_000,
+                        sender=ORIGIN,
+                        recipient=RECIPIENT,
+                        record_type="internal",
+                        value="1000",
+                        asset_address=None,
+                        token_id=None,
+                        source="fixture:internal",
+                    ),
+                    HistoryRecord(
+                        transaction_hash=RELATED_HASH,
+                        block_number=101,
+                        transaction_index=2,
+                        timestamp=1_700_000_001,
+                        sender=ORIGIN,
+                        recipient=RECIPIENT,
+                        record_type="normal",
+                        value="1",
+                        asset_address=None,
+                        token_id=None,
+                        source="fixture:normal",
+                    ),
+                )
+
+        rpc = OneMissingRpc()
+        seed = investigate_transaction(
+            rpc,  # type: ignore[arg-type]
+            ETHEREUM,
+            TX_HASH,
+            replay_prestate=False,
+        )
+        reconstruction = reconstruct_attack_case(
+            rpc,  # type: ignore[arg-type]
+            ETHEREUM,
+            seed,
+            FailureHistory(),
+            limits=ReconstructionLimits(max_hops=1, max_transactions=2),
+        )
+        self.assertEqual(
+            {item.transaction_hash for item in reconstruction.contexts},
+            {TX_HASH, RELATED_HASH},
+        )
+        self.assertEqual(reconstruction.coverage.transaction_failures, 1)
+        self.assertEqual(
+            reconstruction.coverage.history_sources,
+            ("fixture:internal", "fixture:normal"),
+        )
 
 
 if __name__ == "__main__":

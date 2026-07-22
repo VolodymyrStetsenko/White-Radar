@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "white-radar"
-version = "0.3.0"
-description = "Read-only cross-transaction incident reconstruction and quiet protocol guard for EVM networks."
+version = "0.3.1"
+description = "WhiteRadar Incident: read-only cross-transaction forensics for EVM networks."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

@@ -31,6 +31,9 @@ MAX_ERC1155_BATCH_ITEMS = 256
 MAX_CALLDATA_BYTES = 16_384
 MAX_EVENT_DATA_BYTES = 16_384
 VALUE_TRANSFER_CALL_TYPES = frozenset({"CALL", "CREATE", "CREATE2", "SELFDESTRUCT"})
+EXECUTION_COMMITTED = "committed"
+EXECUTION_ATTEMPTED_REVERTED = "attempted_reverted"
+EXECUTION_UNKNOWN = "unknown"
 
 TRANSFER_TOPIC = "0x" + keccak_256(b"Transfer(address,address,uint256)").hex()
 TRANSFER_SINGLE_TOPIC = (
@@ -144,6 +147,7 @@ class CallFrame:
     abi_source: str | None
     error: str | None
     revert_reason: str | None
+    execution_effect: str = EXECUTION_UNKNOWN
     decode_confidence: str | None = None
     decoded_arguments: dict[str, object] = dataclasses.field(default_factory=dict)
     calldata: str = "0x"
@@ -189,6 +193,7 @@ class AssetTransfer:
     operator: str | None
     source: str
     evidence_ref: str
+    execution_effect: str = EXECUTION_UNKNOWN
     asset_name: str | None = None
     asset_symbol: str | None = None
     asset_decimals: int | None = None
@@ -224,6 +229,7 @@ class Relationship:
     asset_type: str | None = None
     asset_symbol: str | None = None
     amount_display: str | None = None
+    execution_effect: str = EXECUTION_UNKNOWN
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -319,9 +325,7 @@ def _flatten_trace(
         )
         calldata_truncated = calldata_bytes > MAX_CALLDATA_BYTES
         bounded_calldata = (
-            "0x" + raw_calldata[:MAX_CALLDATA_BYTES].hex()
-            if raw_calldata is not None
-            else "0x"
+            "0x" + raw_calldata[:MAX_CALLDATA_BYTES].hex() if raw_calldata is not None else "0x"
         )
         decoded: DecodedCall | None = None
         if (
@@ -379,8 +383,40 @@ def _flatten_trace(
     return tuple(frames), truncated
 
 
+def _classify_call_effects(
+    calls: tuple[CallFrame, ...], transaction_status: str
+) -> tuple[CallFrame, ...]:
+    """Classify whether each traced frame changed final chain state.
+
+    A failed frame reverts its entire subtree even when a successful parent catches the
+    failure. A reverted top-level transaction reverts every frame. The trace remains useful
+    as attempted execution evidence, but it must not be presented as committed asset flow.
+    """
+
+    failed_paths = tuple(
+        frame.path for frame in calls if frame.error is not None or frame.revert_reason is not None
+    )
+
+    def has_failed_ancestor(path: str) -> bool:
+        return any(path == failed or path.startswith(f"{failed}.") for failed in failed_paths)
+
+    classified: list[CallFrame] = []
+    for frame in calls:
+        if transaction_status == "reverted" or has_failed_ancestor(frame.path):
+            effect = EXECUTION_ATTEMPTED_REVERTED
+        elif transaction_status == "succeeded":
+            effect = EXECUTION_COMMITTED
+        else:
+            effect = EXECUTION_UNKNOWN
+        classified.append(dataclasses.replace(frame, execution_effect=effect))
+    return tuple(classified)
+
+
 def _transfers_from_logs(
-    logs: Iterable[dict[str, Any]], warnings: list[str] | None = None
+    logs: Iterable[dict[str, Any]],
+    warnings: list[str] | None = None,
+    *,
+    execution_effect: str = EXECUTION_COMMITTED,
 ) -> list[AssetTransfer]:
     transfers: list[AssetTransfer] = []
     notices = warnings if warnings is not None else []
@@ -415,6 +451,7 @@ def _transfers_from_logs(
                         operator=None,
                         source="receipt_log",
                         evidence_ref=evidence_ref,
+                        execution_effect=execution_effect,
                     )
                 )
             elif len(raw) >= 32:
@@ -430,6 +467,7 @@ def _transfers_from_logs(
                         operator=None,
                         source="receipt_log",
                         evidence_ref=evidence_ref,
+                        execution_effect=execution_effect,
                     )
                 )
         elif topic0 == TRANSFER_SINGLE_TOPIC and token and raw is not None and len(topics) >= 4:
@@ -451,6 +489,7 @@ def _transfers_from_logs(
                         operator=operator,
                         source="receipt_log",
                         evidence_ref=evidence_ref,
+                        execution_effect=execution_effect,
                     )
                 )
             elif sender and recipient:
@@ -482,6 +521,7 @@ def _transfers_from_logs(
                             operator=operator,
                             source="receipt_log",
                             evidence_ref=evidence_ref,
+                            execution_effect=execution_effect,
                         )
                     )
                 if len(selected) < len(token_ids):
@@ -523,9 +563,7 @@ def _events_from_logs(
         data_sha256 = hashlib.sha256(raw_data).hexdigest() if raw_data is not None else None
         data_truncated = data_bytes > MAX_EVENT_DATA_BYTES
         bounded_data = (
-            "0x" + raw_data[:MAX_EVENT_DATA_BYTES].hex()
-            if raw_data is not None
-            else "0x"
+            "0x" + raw_data[:MAX_EVENT_DATA_BYTES].hex() if raw_data is not None else "0x"
         )
         decoded = None
         if resolver and address and topics:
@@ -570,10 +608,13 @@ def _events_from_logs(
 
 
 def _native_transfers(
-    calls: tuple[CallFrame, ...], transaction: dict[str, Any]
+    calls: tuple[CallFrame, ...],
+    transaction: dict[str, Any],
+    *,
+    transaction_status: str,
 ) -> list[AssetTransfer]:
     transfers: list[AssetTransfer] = []
-    candidates: Iterable[tuple[str, str | None, str | None, int, str, str, str]]
+    candidates: Iterable[tuple[str, str | None, str | None, int, str, str, str, str]]
     if calls:
         candidates = (
             (
@@ -584,10 +625,17 @@ def _native_transfers(
                 frame.call_type,
                 "call_trace",
                 f"call:{frame.path}",
+                frame.execution_effect,
             )
             for frame in calls
         )
     else:
+        if transaction_status == "succeeded":
+            top_level_effect = EXECUTION_COMMITTED
+        elif transaction_status == "reverted":
+            top_level_effect = EXECUTION_ATTEMPTED_REVERTED
+        else:
+            top_level_effect = EXECUTION_UNKNOWN
         candidates = (
             (
                 "0",
@@ -597,9 +645,19 @@ def _native_transfers(
                 "CALL",
                 "transaction",
                 "transaction",
+                top_level_effect,
             ),
         )
-    for path, sender, recipient, value, call_type, source, evidence_ref in candidates:
+    for (
+        path,
+        sender,
+        recipient,
+        value,
+        call_type,
+        source,
+        evidence_ref,
+        execution_effect,
+    ) in candidates:
         if value <= 0 or not sender or not recipient or call_type not in VALUE_TRANSFER_CALL_TYPES:
             continue
         transfers.append(
@@ -614,6 +672,7 @@ def _native_transfers(
                 operator=None,
                 source=source,
                 evidence_ref=evidence_ref,
+                execution_effect=execution_effect,
             )
         )
     return transfers
@@ -731,6 +790,7 @@ def _build_relationships(
                     relation=frame.call_type,
                     evidence_ref=f"call:{frame.path}",
                     amount=str(transferred_value) if transferred_value else None,
+                    execution_effect=frame.execution_effect,
                 )
             )
     for transfer in transfers:
@@ -746,6 +806,7 @@ def _build_relationships(
                 asset_type=transfer.asset_type,
                 asset_symbol=transfer.asset_symbol,
                 amount_display=transfer.amount_display,
+                execution_effect=transfer.execution_effect,
             )
         )
     return tuple(relationships)
@@ -760,7 +821,13 @@ def _build_timeline(
     for order, frame in enumerate(calls):
         destination = frame.recipient or "contract creation"
         function = frame.function_signature or frame.selector
-        suffix = " (reverted)" if frame.error or frame.revert_reason else ""
+        suffix = (
+            " (attempted; reverted)"
+            if frame.execution_effect == EXECUTION_ATTEMPTED_REVERTED
+            else " (final effect unknown)"
+            if frame.execution_effect == EXECUTION_UNKNOWN
+            else ""
+        )
         timeline.append(
             TimelineEntry(
                 entry_id=f"call:{frame.path}",
@@ -779,9 +846,7 @@ def _build_timeline(
                 entry_id=f"event:{event.log_index}",
                 phase="events",
                 order=event.log_index,
-                event_type=(
-                    "verified_event" if event.decode_confidence == "verified" else "event"
-                ),
+                event_type=("verified_event" if event.decode_confidence == "verified" else "event"),
                 summary=f"{identity} emitted by {emitter}",
                 evidence_ref=event.evidence_ref,
             )
@@ -798,9 +863,14 @@ def _build_timeline(
                 entry_id=transfer.transfer_id,
                 phase="asset_flow",
                 order=order,
-                event_type=f"{transfer.asset_type}_transfer",
+                event_type=(
+                    f"{transfer.asset_type}_transfer"
+                    if transfer.execution_effect == EXECUTION_COMMITTED
+                    else f"attempted_{transfer.asset_type}_transfer"
+                ),
                 summary=(
-                    f"{transfer.amount} {transfer.asset_type}{identifier} from "
+                    f"{transfer.execution_effect}: {transfer.amount} "
+                    f"{transfer.asset_type}{identifier} from "
                     f"{transfer.sender} to {transfer.recipient}"
                 ),
                 evidence_ref=transfer.evidence_ref,
@@ -867,10 +937,19 @@ def _build_findings(
             )
         )
     token_transfers = tuple(
-        transfer.evidence_ref for transfer in transfers if transfer.asset_type != "native"
+        transfer.evidence_ref
+        for transfer in transfers
+        if transfer.asset_type != "native" and transfer.execution_effect == EXECUTION_COMMITTED
     )
     native_transfers = tuple(
-        transfer.evidence_ref for transfer in transfers if transfer.asset_type == "native"
+        transfer.evidence_ref
+        for transfer in transfers
+        if transfer.asset_type == "native" and transfer.execution_effect == EXECUTION_COMMITTED
+    )
+    attempted_transfers = tuple(
+        transfer.evidence_ref
+        for transfer in transfers
+        if transfer.execution_effect == EXECUTION_ATTEMPTED_REVERTED
     )
     if token_transfers:
         findings.append(
@@ -888,6 +967,16 @@ def _build_findings(
                 "asset_flow",
                 f"The call graph reconstructs {len(native_transfers)} native-value transfer(s).",
                 native_transfers[:20],
+            )
+        )
+    if attempted_transfers:
+        findings.append(
+            InvestigationFinding(
+                "attempted_reverted_asset_flow",
+                "asset_flow",
+                f"The trace records {len(attempted_transfers)} attempted value transfer(s) "
+                "that did not commit to final chain state.",
+                attempted_transfers[:20],
             )
         )
     if proxy_snapshot and proxy_snapshot.effective_implementation:
@@ -1059,9 +1148,7 @@ def investigate_transaction(
     if not isinstance(raw_receipt_logs, list):
         raw_receipt_logs = []
         warnings.append("Receipt logs are malformed and could not be retained.")
-    receipt_logs = [
-        item for item in raw_receipt_logs[:MAX_RECEIPT_LOGS] if isinstance(item, dict)
-    ]
+    receipt_logs = [item for item in raw_receipt_logs[:MAX_RECEIPT_LOGS] if isinstance(item, dict)]
     if len(raw_receipt_logs) > MAX_RECEIPT_LOGS:
         warnings.append(f"Receipt logs were capped at {MAX_RECEIPT_LOGS} entries.")
     events = _events_from_logs(
@@ -1104,6 +1191,7 @@ def investigate_transaction(
         if trace
         else ((), False)
     )
+    calls = _classify_call_effects(calls, status)
     if trace_truncated:
         warnings.append(f"The call graph was capped at {MAX_CALL_FRAMES} frames.")
     truncated_calldata = sum(frame.calldata_truncated for frame in calls)
@@ -1145,8 +1233,19 @@ def investigate_transaction(
                     + " via proxy implementation",
                 )
 
+    log_effect = EXECUTION_COMMITTED if status == "succeeded" else EXECUTION_UNKNOWN
+    if status == "reverted" and receipt_logs:
+        warnings.append(
+            "The RPC receipt reports a reverted transaction but also contains logs; log-derived "
+            "asset effects are classified as unknown because this evidence is inconsistent."
+        )
     transfers = tuple(
-        _native_transfers(calls, transaction) + _transfers_from_logs(receipt_logs, warnings)
+        _native_transfers(calls, transaction, transaction_status=status)
+        + _transfers_from_logs(
+            receipt_logs,
+            warnings,
+            execution_effect=log_effect,
+        )
     )
     entities, entities_truncated = _build_entities(
         rpc,
@@ -1190,7 +1289,7 @@ def investigate_transaction(
         state_diff=state_diff,
     )
     return InvestigationCase(
-        schema_version=2,
+        schema_version=3,
         case_id=f"{chain.name}-{tx_hash[2:18]}",
         generated_at=utc_now(),
         chain=chain.name,
