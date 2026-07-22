@@ -152,7 +152,9 @@ class ReconstructionTests(unittest.TestCase):
             self.assertIn("decoded_arguments", calls_csv.splitlines()[0])
             ET.parse(root / "graph.graphml")
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 3)
+            self.assertIn("events.csv", {item["path"] for item in manifest["files"]})
+            self.assertIn("state_changes.csv", {item["path"] for item in manifest["files"]})
             for item in manifest["files"]:
                 path = root / item["path"]
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), item["sha256"])

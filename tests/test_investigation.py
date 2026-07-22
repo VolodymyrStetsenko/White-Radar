@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.common import ETHEREUM
-from white_radar.abi import DecodedCall
+from white_radar.abi import DecodedCall, DecodedEvent
 from white_radar.case_bundle import BUNDLE_FILES, write_case_bundle
 from white_radar.enrichment import EIP1967_SLOTS
 from white_radar.investigation import (
@@ -42,6 +42,25 @@ class FakeResolver:
     ) -> DecodedCall:
         signature = "execute(uint256)" if address == TARGET else None
         return DecodedCall(calldata[:10], signature, {"amount": 7}, "fixture", "f" * 64)
+
+    def resolve_event(
+        self,
+        chain_id: int,
+        address: str,
+        topics: list[str],
+        data: str,
+    ) -> DecodedEvent | None:
+        del chain_id, data
+        if address != TOKEN or not topics or topics[0] != TRANSFER_TOPIC:
+            return None
+        return DecodedEvent(
+            topic0=topics[0],
+            signature="Transfer(address,address,uint256)",
+            name="Transfer",
+            arguments={"value": 1_000},
+            source="fixture ABI",
+            abi_sha256="e" * 64,
+        )
 
 
 class InvestigationRpc:
@@ -120,6 +139,27 @@ class InvestigationRpc:
             ],
         }
 
+    def trace_transaction_state_diff(self, tx_hash: str) -> dict[str, Any]:
+        del tx_hash
+        return {
+            "pre": {
+                TARGET: {
+                    "balance": "0xa",
+                    "nonce": "0x1",
+                    "code": "0x6000",
+                    "storage": {"0x01": "0x02"},
+                }
+            },
+            "post": {
+                TARGET: {
+                    "balance": "0x5",
+                    "nonce": "0x2",
+                    "code": "0x6000",
+                    "storage": {"0x01": "0x03"},
+                }
+            },
+        }
+
     def storage_at(self, address: str, slot: str, block: str = "latest") -> str:
         assert slot in EIP1967_SLOTS.values()
         return "0x" + "00" * 32
@@ -154,6 +194,8 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(case.transfers[-1].amount, "1000")
         self.assertEqual(case.root_call.signature, "execute(uint256)")  # type: ignore[union-attr]
         self.assertEqual(case.calls[0].decoded_arguments, {"amount": 7})
+        self.assertEqual(case.events[0].event_signature, "Transfer(address,address,uint256)")
+        self.assertEqual(case.events[0].decode_confidence, "verified")
         self.assertEqual(case.calls[0].calldata_bytes, 36)
         self.assertEqual(
             case.calls[0].calldata_sha256,
@@ -168,6 +210,9 @@ class InvestigationTests(unittest.TestCase):
         self.assertTrue(case.trace_available)
         self.assertEqual(case.historical_replay.block_number, 99)  # type: ignore[union-attr]
         self.assertIn("delegated_execution", {item.code for item in case.findings})
+        self.assertIn("verified_event_evidence", {item.code for item in case.findings})
+        self.assertIn("state_changes_observed", {item.code for item in case.findings})
+        self.assertEqual(case.state_diff.storage_change_count, 1)  # type: ignore[union-attr]
         self.assertIn(TOKEN, {item.address for item in case.entities})
 
     def test_trace_unavailability_preserves_receipt_analysis(self) -> None:
@@ -318,6 +363,7 @@ class InvestigationTests(unittest.TestCase):
             result = write_case_bundle(case, destination)
             self.assertEqual({item.name for item in result.files}, set(BUNDLE_FILES))
             manifest = json.loads(result.manifest.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], 2)
             for item in manifest["files"]:
                 path = destination / item["path"]
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), item["sha256"])
@@ -326,6 +372,8 @@ class InvestigationTests(unittest.TestCase):
                 "White Radar investigation graph",
                 (destination / "graph.html").read_text(),
             )
+            self.assertIn("event_signature", (destination / "events.csv").read_text())
+            self.assertIn(TARGET, (destination / "state_changes.csv").read_text())
             with self.assertRaises(FileExistsError):
                 write_case_bundle(case, destination)
 

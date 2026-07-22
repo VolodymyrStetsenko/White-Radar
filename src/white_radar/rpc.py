@@ -170,6 +170,24 @@ class JsonRpcClient:
         )
         return result if isinstance(result, dict) else None
 
+    def trace_transaction_state_diff(self, tx_hash: str) -> dict[str, Any] | None:
+        result = self.call(
+            "debug_traceTransaction",
+            [
+                tx_hash,
+                {
+                    "tracer": "prestateTracer",
+                    "timeout": "10s",
+                    "tracerConfig": {
+                        "diffMode": True,
+                        "disableCode": False,
+                        "disableStorage": False,
+                    },
+                },
+            ],
+        )
+        return result if isinstance(result, dict) else None
+
     def trace_call(
         self,
         transaction: dict[str, object],

@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the read-only eth_call replay at transaction block minus one.",
     )
     investigate.add_argument(
+        "--no-state-diff",
+        action="store_false",
+        dest="state_diff",
+        help="Skip prestateTracer diff-mode collection when the provider does not support it.",
+    )
+    investigate.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace known files in an existing case directory.",
@@ -143,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Cross-transaction discovery source (default: %(default)s).",
     )
-    investigate.set_defaults(trace=True, replay=True)
+    investigate.set_defaults(trace=True, replay=True, state_diff=True)
 
     doctor = subparsers.add_parser("doctor", help="Validate configuration and RPC identity.")
     doctor.add_argument("--online", action="store_true", help="Call enabled RPC endpoints.")
@@ -659,6 +665,7 @@ def cmd_investigate(
     tx_hash: str,
     output: Path | None,
     trace: bool,
+    state_diff: bool,
     replay: bool,
     overwrite: bool,
     single_transaction: bool,
@@ -684,6 +691,7 @@ def cmd_investigate(
         resolver=resolver,
         watchlist=watchlist,
         include_trace=trace,
+        include_state_diff=state_diff,
         replay_prestate=replay,
     )
     token_metadata = TokenMetadataResolver(rpc)
@@ -706,7 +714,9 @@ def cmd_investigate(
                     "transaction_hash": case.transaction_hash,
                     "status": case.transaction_status,
                     "calls": len(case.calls),
+                    "events": len(case.events),
                     "transfers": len(case.transfers),
+                    "state_accounts": len(case.state_diff.accounts) if case.state_diff else 0,
                     "entities": len(case.entities),
                     "findings": len(case.findings),
                     "warnings": list(case.warnings),
@@ -750,6 +760,7 @@ def cmd_investigate(
         watchlist=watchlist,
         token_metadata=token_metadata,
         include_trace=trace,
+        include_state_diff=state_diff,
     )
     destination = (
         output.expanduser().resolve()
@@ -874,6 +885,7 @@ def main(argv: list[str] | None = None) -> None:
                 tx_hash=args.tx_hash,
                 output=args.output,
                 trace=args.trace,
+                state_diff=args.state_diff,
                 replay=args.replay,
                 overwrite=args.overwrite,
                 single_transaction=args.single_transaction,

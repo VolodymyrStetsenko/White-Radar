@@ -12,6 +12,7 @@ from white_radar.models import ChainConfig, utc_now
 from white_radar.proxy import ProxySnapshot, inspect_proxy
 from white_radar.rpc import JsonRpcClient, RpcError, hex_to_int
 from white_radar.simulation import SimulationResult, simulate_transaction
+from white_radar.state_diff import StateDiff, parse_state_diff
 
 if TYPE_CHECKING:
     from white_radar.config import Watchlist
@@ -25,8 +26,10 @@ MAX_TRANSFERS = 20_000
 MAX_ENTITIES = 1_000
 MAX_CODE_LOOKUPS = 128
 MAX_ABI_DESTINATIONS = 32
+MAX_ABI_EVENT_ADDRESSES = 32
 MAX_ERC1155_BATCH_ITEMS = 256
 MAX_CALLDATA_BYTES = 16_384
+MAX_EVENT_DATA_BYTES = 16_384
 VALUE_TRANSFER_CALL_TYPES = frozenset({"CALL", "CREATE", "CREATE2", "SELFDESTRUCT"})
 
 TRANSFER_TOPIC = "0x" + keccak_256(b"Transfer(address,address,uint256)").hex()
@@ -153,6 +156,28 @@ class CallFrame:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class EventRecord:
+    log_index: int
+    address: str | None
+    topic0: str | None
+    event_signature: str | None
+    event_name: str | None
+    arguments: dict[str, object]
+    abi_source: str | None
+    abi_sha256: str | None
+    decode_confidence: str | None
+    topics: tuple[str, ...]
+    data: str
+    data_bytes: int
+    data_sha256: str | None
+    data_truncated: bool
+    evidence_ref: str
+
+    def to_dict(self) -> dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class AssetTransfer:
     transfer_id: str
     asset_type: str
@@ -248,6 +273,7 @@ class InvestigationCase:
     source_receipt: dict[str, Any]
     root_call: DecodedCall | None
     calls: tuple[CallFrame, ...]
+    events: tuple[EventRecord, ...]
     transfers: tuple[AssetTransfer, ...]
     entities: tuple[Entity, ...]
     relationships: tuple[Relationship, ...]
@@ -256,6 +282,7 @@ class InvestigationCase:
     warnings: tuple[str, ...]
     proxy_snapshot: ProxySnapshot | None
     historical_replay: SimulationResult | None
+    state_diff: StateDiff | None
 
     def to_dict(self) -> dict[str, Any]:
         result = dataclasses.asdict(self)
@@ -465,6 +492,83 @@ def _transfers_from_logs(
     return transfers
 
 
+def _events_from_logs(
+    logs: Iterable[dict[str, Any]],
+    *,
+    resolver: AbiResolver | None,
+    chain_id: int,
+    warnings: list[str],
+) -> tuple[EventRecord, ...]:
+    events: list[EventRecord] = []
+    abi_addresses: set[str] = set()
+    abi_limit_reached = False
+    for ordinal, log in enumerate(logs):
+        try:
+            log_index = hex_to_int(str(log.get("logIndex") or hex(ordinal)))
+        except ValueError:
+            log_index = ordinal
+        address = _address(log.get("address"))
+        raw_topics = log.get("topics") or []
+        topics = (
+            tuple(
+                str(topic).lower()
+                for topic in raw_topics
+                if isinstance(topic, str) and topic.startswith("0x")
+            )
+            if isinstance(raw_topics, list)
+            else ()
+        )
+        raw_data = _hex_data(log.get("data"))
+        data_bytes = len(raw_data) if raw_data is not None else 0
+        data_sha256 = hashlib.sha256(raw_data).hexdigest() if raw_data is not None else None
+        data_truncated = data_bytes > MAX_EVENT_DATA_BYTES
+        bounded_data = (
+            "0x" + raw_data[:MAX_EVENT_DATA_BYTES].hex()
+            if raw_data is not None
+            else "0x"
+        )
+        decoded = None
+        if resolver and address and topics:
+            if address in abi_addresses or len(abi_addresses) < MAX_ABI_EVENT_ADDRESSES:
+                abi_addresses.add(address)
+                try:
+                    decoded = resolver.resolve_event(chain_id, address, list(topics), bounded_data)
+                except (AttributeError, ValueError):
+                    decoded = None
+            else:
+                abi_limit_reached = True
+        events.append(
+            EventRecord(
+                log_index=log_index,
+                address=address,
+                topic0=topics[0] if topics else None,
+                event_signature=decoded.signature if decoded else None,
+                event_name=decoded.name if decoded else None,
+                arguments=dict(decoded.arguments) if decoded else {},
+                abi_source=decoded.source if decoded else None,
+                abi_sha256=decoded.abi_sha256 if decoded else None,
+                decode_confidence=decoded.confidence if decoded else None,
+                topics=topics,
+                data=bounded_data,
+                data_bytes=data_bytes,
+                data_sha256=data_sha256,
+                data_truncated=data_truncated,
+                evidence_ref=f"log:{log_index}",
+            )
+        )
+    if abi_limit_reached:
+        warnings.append(
+            f"Verified event ABI resolution was capped at {MAX_ABI_EVENT_ADDRESSES} "
+            "unique log-emitting addresses."
+        )
+    if any(item.data_truncated for item in events):
+        warnings.append(
+            f"One or more event payloads exceeded {MAX_EVENT_DATA_BYTES} bytes; full "
+            "payload SHA-256 values are retained."
+        )
+    return tuple(events)
+
+
 def _native_transfers(
     calls: tuple[CallFrame, ...], transaction: dict[str, Any]
 ) -> list[AssetTransfer]:
@@ -530,6 +634,7 @@ def _build_entities(
     transaction: dict[str, Any],
     receipt: dict[str, Any],
     calls: tuple[CallFrame, ...],
+    events: tuple[EventRecord, ...],
     transfers: tuple[AssetTransfer, ...],
     watchlist: Watchlist | None,
 ) -> tuple[tuple[Entity, ...], bool]:
@@ -560,6 +665,8 @@ def _build_entities(
             "created_contract" if frame.call_type in {"CREATE", "CREATE2"} else "call_recipient",
             "contract" if frame.call_type in {"CREATE", "CREATE2", "DELEGATECALL"} else None,
         )
+    for event in events:
+        add(event.address, "event_emitter", "contract")
     for transfer in transfers:
         add(transfer.sender, "asset_sender")
         add(transfer.recipient, "asset_recipient")
@@ -645,7 +752,9 @@ def _build_relationships(
 
 
 def _build_timeline(
-    calls: tuple[CallFrame, ...], transfers: tuple[AssetTransfer, ...]
+    calls: tuple[CallFrame, ...],
+    events: tuple[EventRecord, ...],
+    transfers: tuple[AssetTransfer, ...],
 ) -> tuple[TimelineEntry, ...]:
     timeline: list[TimelineEntry] = []
     for order, frame in enumerate(calls):
@@ -660,6 +769,21 @@ def _build_timeline(
                 event_type=frame.call_type.lower(),
                 summary=f"{frame.call_type} to {destination} via {function}{suffix}",
                 evidence_ref=f"call:{frame.path}",
+            )
+        )
+    for event in events:
+        identity = event.event_signature or event.topic0 or "anonymous/unresolved"
+        emitter = event.address or "unknown emitter"
+        timeline.append(
+            TimelineEntry(
+                entry_id=f"event:{event.log_index}",
+                phase="events",
+                order=event.log_index,
+                event_type=(
+                    "verified_event" if event.decode_confidence == "verified" else "event"
+                ),
+                summary=f"{identity} emitted by {emitter}",
+                evidence_ref=event.evidence_ref,
             )
         )
     for transfer in transfers:
@@ -682,7 +806,7 @@ def _build_timeline(
                 evidence_ref=transfer.evidence_ref,
             )
         )
-    phase_order = {"execution": 0, "asset_flow": 1}
+    phase_order = {"execution": 0, "events": 1, "asset_flow": 2}
     return tuple(
         sorted(
             timeline,
@@ -695,8 +819,10 @@ def _build_findings(
     *,
     status: str,
     calls: tuple[CallFrame, ...],
+    events: tuple[EventRecord, ...],
     transfers: tuple[AssetTransfer, ...],
     proxy_snapshot: ProxySnapshot | None,
+    state_diff: StateDiff | None,
 ) -> tuple[InvestigationFinding, ...]:
     findings: list[InvestigationFinding] = []
     if status == "reverted":
@@ -774,6 +900,28 @@ def _build_findings(
                 ("proxy_snapshot",),
             )
         )
+    verified_events = tuple(
+        event.evidence_ref for event in events if event.decode_confidence == "verified"
+    )
+    if verified_events:
+        findings.append(
+            InvestigationFinding(
+                "verified_event_evidence",
+                "event_evidence",
+                f"Verified contract ABIs decoded {len(verified_events)} emitted event(s).",
+                verified_events[:20],
+            )
+        )
+    if state_diff and state_diff.accounts:
+        findings.append(
+            InvestigationFinding(
+                "state_changes_observed",
+                "state_evidence",
+                f"The pre/post trace records {len(state_diff.accounts)} changed account(s) "
+                f"and {state_diff.storage_change_count} changed storage slot(s).",
+                ("state_diff",),
+            )
+        )
     return tuple(findings)
 
 
@@ -816,8 +964,26 @@ def _source_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         "logsBloom",
     )
     result = {field: receipt[field] for field in fields if field in receipt}
-    logs = receipt.get("logs") or []
-    result["logs"] = [item for item in logs[:MAX_RECEIPT_LOGS] if isinstance(item, dict)]
+    raw_logs = receipt.get("logs") or []
+    logs = raw_logs if isinstance(raw_logs, list) else []
+    bounded_logs: list[dict[str, Any]] = []
+    for item in logs[:MAX_RECEIPT_LOGS]:
+        if not isinstance(item, dict):
+            continue
+        selected = dict(item)
+        raw_data = _hex_data(item.get("data"))
+        if raw_data is not None:
+            selected["data"] = "0x" + raw_data[:MAX_EVENT_DATA_BYTES].hex()
+            selected["dataBytes"] = len(raw_data)
+            selected["dataSha256"] = hashlib.sha256(raw_data).hexdigest()
+            selected["dataTruncated"] = len(raw_data) > MAX_EVENT_DATA_BYTES
+        else:
+            selected["data"] = str(item.get("data") or "0x")[: 2 + MAX_EVENT_DATA_BYTES * 2]
+        topics = item.get("topics")
+        if isinstance(topics, list):
+            selected["topics"] = [str(topic)[:66] for topic in topics[:32]]
+        bounded_logs.append(selected)
+    result["logs"] = bounded_logs
     return result
 
 
@@ -829,6 +995,7 @@ def investigate_transaction(
     resolver: AbiResolver | None = None,
     watchlist: Watchlist | None = None,
     include_trace: bool = True,
+    include_state_diff: bool = True,
     replay_prestate: bool = True,
 ) -> InvestigationCase:
     """Reconstruct one confirmed transaction into a bounded, read-only evidence case."""
@@ -888,11 +1055,21 @@ def investigate_transaction(
     warnings: list[str] = []
     if transaction_fee_wei is None:
         warnings.append("Transaction fee is unavailable because gas evidence is incomplete.")
+    raw_receipt_logs = receipt.get("logs") or []
+    if not isinstance(raw_receipt_logs, list):
+        raw_receipt_logs = []
+        warnings.append("Receipt logs are malformed and could not be retained.")
     receipt_logs = [
-        item for item in (receipt.get("logs") or [])[:MAX_RECEIPT_LOGS] if isinstance(item, dict)
+        item for item in raw_receipt_logs[:MAX_RECEIPT_LOGS] if isinstance(item, dict)
     ]
-    if len(receipt.get("logs") or []) > MAX_RECEIPT_LOGS:
+    if len(raw_receipt_logs) > MAX_RECEIPT_LOGS:
         warnings.append(f"Receipt logs were capped at {MAX_RECEIPT_LOGS} entries.")
+    events = _events_from_logs(
+        receipt_logs,
+        resolver=resolver,
+        chain_id=chain.chain_id,
+        warnings=warnings,
+    )
 
     proxy_snapshot: ProxySnapshot | None = None
     target = _address(transaction.get("to"))
@@ -937,6 +1114,20 @@ def investigate_transaction(
             "are retained."
         )
 
+    state_diff: StateDiff | None = None
+    if include_state_diff:
+        try:
+            raw_state_diff = rpc.trace_transaction_state_diff(tx_hash)
+            if raw_state_diff is None:
+                warnings.append("The RPC endpoint returned no pre/post state-diff evidence.")
+            else:
+                state_diff = parse_state_diff(raw_state_diff)
+                warnings.extend(state_diff.warnings)
+        except (RpcError, AttributeError, ValueError):
+            warnings.append(
+                "Pre/post account and storage changes are unavailable from this RPC endpoint."
+            )
+
     root_calldata = str(transaction.get("input") or "0x")
     root_call: DecodedCall | None = None
     if resolver and target:
@@ -964,13 +1155,14 @@ def investigate_transaction(
         transaction=transaction,
         receipt=receipt,
         calls=calls,
+        events=events,
         transfers=transfers,
         watchlist=watchlist,
     )
     if entities_truncated:
         warnings.append(f"The entity inventory was capped at {MAX_ENTITIES} addresses.")
     relationships = _build_relationships(calls, transfers)
-    timeline = _build_timeline(calls, transfers)
+    timeline = _build_timeline(calls, events, transfers)
 
     historical_replay: SimulationResult | None = None
     if replay_prestate and block_number > 0:
@@ -992,11 +1184,13 @@ def investigate_transaction(
     findings = _build_findings(
         status=status,
         calls=calls,
+        events=events,
         transfers=transfers,
         proxy_snapshot=proxy_snapshot,
+        state_diff=state_diff,
     )
     return InvestigationCase(
-        schema_version=1,
+        schema_version=2,
         case_id=f"{chain.name}-{tx_hash[2:18]}",
         generated_at=utc_now(),
         chain=chain.name,
@@ -1014,6 +1208,7 @@ def investigate_transaction(
         source_receipt=_source_receipt(receipt),
         root_call=root_call,
         calls=calls,
+        events=events,
         transfers=transfers,
         entities=entities,
         relationships=relationships,
@@ -1022,4 +1217,5 @@ def investigate_transaction(
         warnings=tuple(dict.fromkeys(warnings)),
         proxy_snapshot=proxy_snapshot,
         historical_replay=historical_replay,
+        state_diff=state_diff,
     )

@@ -65,7 +65,10 @@ confirmation. It then reconstructs:
   Geth-compatible `callTracer` is available;
 - native value plus ERC-20, ERC-721, ERC-1155 single, and bounded ERC-1155 batch movement;
 - verified function signatures and bounded static argument values;
+- every retained receipt event plus verified-ABI decoding of indexed and non-indexed arguments;
 - explicit unverified selector hints when no verified ABI is available;
+- bounded pre/post balance, nonce, code, and contract-storage changes from Geth
+  `prestateTracer` diff mode when supported;
 - EIP-1967 implementation, admin, beacon, UUPS, and legacy `implementation()` context;
 - historical code classification and protocol-inventory labels;
 - a read-only historical replay at block minus one when enabled.
@@ -110,9 +113,9 @@ type, direction, transaction hash, and source adapter remain in the case evidenc
 
 ### 5. Related transaction reconstruction
 
-Selected candidates run through the same transaction, receipt, block, trace, log, ABI, proxy,
-entity, and transfer pipeline as the seed. Failures do not discard the case: they are counted and
-recorded as warnings.
+Selected candidates run through the same transaction, receipt, block, trace, event, state-diff,
+ABI, proxy, entity, and transfer pipeline as the seed. Failures do not discard the case: they are
+counted and recorded as warnings.
 
 New transfer counterparties can enter the next frontier until one of these controls is reached:
 
@@ -145,6 +148,25 @@ evidence.
 Decoded static arguments include addresses, Booleans, integers, and fixed bytes. Dynamic inputs
 are marked rather than copied without ABI-safe decoding.
 
+Verified event ABI entries are matched by the full event-signature topic. Static indexed values
+are decoded from their topics, while indexed arrays, tuples, strings, and dynamic bytes remain
+topic hashes because Solidity does not place their original values in the log. Non-indexed static
+values, strings, and bytes are decoded from bounded event data. Unresolved logs remain in
+`events.csv` with raw topics, bounded data, byte length, and SHA-256; White Radar does not invent
+an event name.
+
+## State-change evidence
+
+When supported by the provider, White Radar requests Geth `prestateTracer` with `diffMode=true`.
+The normalized result records changed accounts and storage slots with pre/post values. Created
+accounts may appear only in `post`; removed accounts may appear only in `pre`. Missing fields are
+kept as unavailable rather than interpreted as zero or unchanged.
+
+State evidence is bounded to 512 accounts and 8,192 changed storage slots per transaction. If a
+bound is reached, the case records truncation and does not claim omitted slots were unchanged.
+Use `--no-state-diff` when a provider rejects this tracer or when a lower-cost investigation is
+required.
+
 ## Token metadata and accounting
 
 For observed ERC-20 contracts, `name()`, `symbol()`, and `decimals()` are queried with `eth_call` at
@@ -174,10 +196,11 @@ methods are recorded as evidence gaps.
 ## Timeline model
 
 The cross-transaction timeline first orders transactions by confirmed ledger position. Inside each
-transaction it preserves two evidence phases:
+transaction it preserves three evidence phases:
 
 1. execution-frame pre-order from the call trace;
-2. asset-flow order from receipt `logIndex`, plus trace paths for native value.
+2. emitted-event order from receipt `logIndex`;
+3. asset-flow order from receipt `logIndex`, plus trace paths for native value.
 
 Standard `callTracer` output does not map every receipt log to an exact internal frame. White Radar
 therefore does not invent a total order that its sources cannot prove.
@@ -190,7 +213,10 @@ therefore does not invent a total order that its sources cannot prove.
 | `report.md` | Executive summary, scope, candidate phases, chronology, asset ledger, selector inventory, proxy context, entities, and gaps |
 | `transactions.csv` | One row per reconstructed transaction with phase, hop, score, and discovery reasons |
 | `calls.csv` | One row per execution frame with selector, signature, source, confidence, and error evidence |
+| `events.csv` | One row per receipt event with topics, payload evidence, verified ABI source, and decoded arguments |
 | `transfers.csv` | Typed asset flow with token metadata, raw amount, display amount, token ID, and evidence reference |
+| `state_changes.csv` | Changed account balances, nonces, and code evidence before and after execution |
+| `storage_changes.csv` | Changed contract storage slots with explicit pre/post values |
 | `entities.csv` | Address kind, label, roles, first/last block, and transaction membership |
 | `relationships.csv` | Call and asset-flow edges with source transaction and evidence reference |
 | `timeline.csv` | Cross-transaction ledger order and per-transaction event order |
@@ -237,6 +263,10 @@ inside a centralized service, or in unavailable provider data.
 | Transfers per transaction | 20,000 | 20,000 |
 | ERC-1155 items per batch | 256 | 256 |
 | ABI destinations per transaction | 32 | 32 |
+| Event ABI addresses per transaction | 32 | 32 |
+| Event data retained per log | 16,384 bytes | 16,384 bytes |
+| State accounts per transaction | 512 | 512 |
+| State storage changes per transaction | 8,192 | 8,192 |
 | Token metadata contracts per run | 64 | 512 |
 
 The interactive report applies display caps for usability. Canonical JSON and CSV retain the full
@@ -247,8 +277,9 @@ full-input SHA-256 remain in the case.
 
 Minimum operation requires standard transaction, receipt, block, code, storage, log, and
 `eth_call` methods. Exact internal execution requires Geth-compatible
-`debug_traceTransaction`/`callTracer`. Indexed cross-transaction history benefits from Etherscan V2
-support for the selected chain.
+`debug_traceTransaction`/`callTracer`. Pre/post state evidence requires a provider that supports
+Geth `prestateTracer` diff mode. Indexed cross-transaction history and verified function/event ABI
+evidence benefit from Etherscan V2 support for the selected chain.
 
 When a trace, ABI, archive state, proxy probe, token metadata call, or indexed history action is
 unavailable, the engine preserves available evidence and records the gap. It never silently

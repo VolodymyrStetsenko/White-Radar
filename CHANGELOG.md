@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- added bounded Geth `prestateTracer` diff-mode account, balance, nonce, code, and storage-change
+  evidence with provider degradation and explicit truncation records;
+- added verified-ABI receipt-event decoding, including indexed dynamic-value hashes and bounded
+  non-indexed string/bytes decoding without invented signatures;
+- added `events.csv`, `state_changes.csv`, and `storage_changes.csv` to single-transaction and
+  cross-transaction evidence bundles, reports, manifests, contexts, and timelines;
+- added `--no-state-diff` for providers that do not support the tracer;
 - expanded `white-radar investigate` from a one-transaction bundle into bounded backward/forward
   reconstruction from any confirmed seed transaction;
 - added indexed Etherscan V2 normal, internal, ERC-20, ERC-721, and ERC-1155 history adapters with

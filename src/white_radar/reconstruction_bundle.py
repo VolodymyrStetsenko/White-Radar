@@ -19,7 +19,10 @@ RECONSTRUCTION_BUNDLE_FILES = (
     "report.md",
     "transactions.csv",
     "calls.csv",
+    "events.csv",
     "transfers.csv",
+    "state_changes.csv",
+    "storage_changes.csv",
     "entities.csv",
     "relationships.csv",
     "timeline.csv",
@@ -53,7 +56,16 @@ def render_reconstruction_report(reconstruction: AttackReconstruction) -> str:
     contexts = reconstruction.contexts
     phases = Counter(item.phase for item in contexts)
     calls = sum(len(item.calls) for item in reconstruction.transactions)
+    events = sum(len(item.events) for item in reconstruction.transactions)
     transfers = sum(len(item.transfers) for item in reconstruction.transactions)
+    state_accounts = sum(
+        len(item.state_diff.accounts) if item.state_diff else 0
+        for item in reconstruction.transactions
+    )
+    storage_changes = sum(
+        item.state_diff.storage_change_count if item.state_diff else 0
+        for item in reconstruction.transactions
+    )
     traced = sum(item.trace_available for item in contexts)
     flow_edges = [item for item in reconstruction.edges if item.asset_type is not None]
     lines = [
@@ -64,7 +76,8 @@ def render_reconstruction_report(reconstruction: AttackReconstruction) -> str:
         (
             f"Seed transaction `{reconstruction.seed_transaction_hash}` was expanded into "
             f"**{len(contexts)} reconstructed transactions**, **{len(reconstruction.entities)} "
-            f"entities**, **{calls} call frames**, and **{transfers} observed asset transfers** "
+            f"entities**, **{calls} call frames**, **{events} emitted events**, and "
+            f"**{transfers} observed asset transfers** "
             f"on **{reconstruction.chain}**."
         ),
         "",
@@ -90,6 +103,8 @@ def render_reconstruction_report(reconstruction: AttackReconstruction) -> str:
         f"- Transactions reconstructed: `{coverage.transactions_reconstructed}`",
         f"- Transaction reconstruction failures: `{coverage.transaction_failures}`",
         f"- Trace coverage: `{traced}/{len(contexts)}` transactions",
+        f"- Changed accounts recorded: `{state_accounts}`",
+        f"- Changed storage slots recorded: `{storage_changes}`",
         (
             "- History sources: "
             + (", ".join(f"`{_plain(item)}`" for item in coverage.history_sources) or "unavailable")
@@ -209,6 +224,54 @@ def render_reconstruction_report(reconstruction: AttackReconstruction) -> str:
     else:
         lines.append("| `unavailable` | 0 | unavailable | Call tracing unavailable |")
 
+    event_counts: Counter[str] = Counter()
+    event_transactions: dict[str, set[str]] = defaultdict(set)
+    event_sources: dict[str, set[str]] = defaultdict(set)
+    event_confidences: dict[str, set[str]] = defaultdict(set)
+    for case in reconstruction.transactions:
+        for event in case.events:
+            identity = event.event_signature or event.topic0 or "anonymous/unresolved"
+            event_counts[identity] += 1
+            event_transactions[identity].add(case.transaction_hash)
+            if event.abi_source:
+                event_sources[identity].add(event.abi_source)
+            event_confidences[identity].add(event.decode_confidence or "unresolved")
+    lines.extend(
+        [
+            "",
+            "## Emitted-event inventory",
+            "",
+            "| Event signature / topic | Occurrences | Transactions | Confidence | ABI sources |",
+            "|---|---:|---:|---|---|",
+        ]
+    )
+    if event_counts:
+        for identity, count in sorted(
+            event_counts.items(), key=lambda item: (-item[1], item[0])
+        ):
+            lines.append(
+                f"| `{_plain(identity)}` | {count} | {len(event_transactions[identity])} | "
+                f"{_plain('; '.join(sorted(event_confidences[identity])))} | "
+                f"{_plain('; '.join(sorted(event_sources[identity])) or 'unresolved')} |"
+            )
+    else:
+        lines.append("| `unavailable` | 0 | 0 | unavailable | No receipt events retained |")
+
+    lines.extend(["", "## Pre/post state-change evidence", ""])
+    if state_accounts or storage_changes:
+        lines.extend(
+            [
+                f"- Changed account records: `{state_accounts}`",
+                f"- Changed storage-slot records: `{storage_changes}`",
+                "- Account-level export: `state_changes.csv`",
+                "- Slot-level export: `storage_changes.csv`",
+            ]
+        )
+    else:
+        lines.append(
+            "- No provider returned prestateTracer diff-mode evidence for the reconstructed transactions."
+        )
+
     proxy_cases = [item for item in reconstruction.transactions if item.proxy_snapshot]
     lines.extend(["", "## Proxy and contract execution context", ""])
     if proxy_cases:
@@ -279,7 +342,10 @@ def render_reconstruction_report(reconstruction: AttackReconstruction) -> str:
             "- `case.json`: canonical machine-readable reconstruction, including every bounded transaction case.",
             "- `transactions.csv`: chronological candidate transaction inventory and discovery reasons.",
             "- `calls.csv`: cross-transaction call-frame inventory with selectors and verified ABI labels.",
+            "- `events.csv`: receipt-event topics, bounded payloads, hashes, and verified ABI decoding.",
             "- `transfers.csv`: raw and normalized native/token transfer ledger.",
+            "- `state_changes.csv`: account balances, nonces, and code evidence before and after execution.",
+            "- `storage_changes.csv`: changed contract storage slots with pre/post values.",
             "- `entities.csv`: address roles and observed participation range.",
             "- `relationships.csv`: evidence-backed graph edges.",
             "- `timeline.csv`: ordered execution and asset-flow events across transactions.",
@@ -604,7 +670,10 @@ def write_reconstruction_bundle(
         for item in reconstruction.contexts
     ]
     call_rows: list[dict[str, object]] = []
+    event_rows: list[dict[str, object]] = []
     transfer_rows: list[dict[str, object]] = []
+    state_rows: list[dict[str, object]] = []
+    storage_rows: list[dict[str, object]] = []
     for case in reconstruction.transactions:
         context = context_by_hash[case.transaction_hash]
         for call in case.calls:
@@ -621,6 +690,20 @@ def write_reconstruction_bundle(
                     **call_data,
                 }
             )
+        for event in case.events:
+            event_rows.append(
+                {
+                    "transaction_hash": case.transaction_hash,
+                    "block_number": case.block_number,
+                    "transaction_phase": context.phase,
+                    "hop": context.hop,
+                    **event.to_dict(),
+                    "arguments": json.dumps(
+                        event.arguments, sort_keys=True, separators=(",", ":")
+                    ),
+                    "topics": json.dumps(event.topics, separators=(",", ":")),
+                }
+            )
         for transfer in case.transfers:
             transfer_rows.append(
                 {
@@ -631,6 +714,30 @@ def write_reconstruction_bundle(
                     **transfer.to_dict(),
                 }
             )
+        if case.state_diff:
+            for account in case.state_diff.accounts:
+                account_data = account.to_dict()
+                account_data.pop("storage_changes", None)
+                state_rows.append(
+                    {
+                        "transaction_hash": case.transaction_hash,
+                        "block_number": case.block_number,
+                        "transaction_phase": context.phase,
+                        "hop": context.hop,
+                        **account_data,
+                    }
+                )
+                storage_rows.extend(
+                    {
+                        "transaction_hash": case.transaction_hash,
+                        "block_number": case.block_number,
+                        "transaction_phase": context.phase,
+                        "hop": context.hop,
+                        "address": account.address,
+                        **storage.to_dict(),
+                    }
+                    for storage in account.storage_changes
+                )
     entity_rows = [
         {
             **item.to_dict(),
@@ -665,7 +772,10 @@ def write_reconstruction_bundle(
                 "function_source",
                 "decoded_arguments",
                 "call_count",
+                "event_count",
                 "transfer_count",
+                "state_account_change_count",
+                "storage_change_count",
                 "trace_available",
             ),
             transaction_rows,
@@ -698,6 +808,30 @@ def write_reconstruction_bundle(
             ),
             call_rows,
         ),
+        "events.csv": _csv_text(
+            (
+                "transaction_hash",
+                "block_number",
+                "transaction_phase",
+                "hop",
+                "log_index",
+                "address",
+                "topic0",
+                "event_signature",
+                "event_name",
+                "arguments",
+                "abi_source",
+                "abi_sha256",
+                "decode_confidence",
+                "topics",
+                "data",
+                "data_bytes",
+                "data_sha256",
+                "data_truncated",
+                "evidence_ref",
+            ),
+            event_rows,
+        ),
         "transfers.csv": _csv_text(
             (
                 "transaction_hash",
@@ -720,6 +854,38 @@ def write_reconstruction_bundle(
                 "evidence_ref",
             ),
             transfer_rows,
+        ),
+        "state_changes.csv": _csv_text(
+            (
+                "transaction_hash",
+                "block_number",
+                "transaction_phase",
+                "hop",
+                "address",
+                "change_type",
+                "balance_before_wei",
+                "balance_after_wei",
+                "nonce_before",
+                "nonce_after",
+                "code_before_bytes",
+                "code_after_bytes",
+                "code_before_sha256",
+                "code_after_sha256",
+            ),
+            state_rows,
+        ),
+        "storage_changes.csv": _csv_text(
+            (
+                "transaction_hash",
+                "block_number",
+                "transaction_phase",
+                "hop",
+                "address",
+                "slot",
+                "before",
+                "after",
+            ),
+            storage_rows,
         ),
         "entities.csv": _csv_text(
             (
@@ -781,7 +947,7 @@ def write_reconstruction_bundle(
         path.write_text(artifacts[name], encoding="utf-8", newline="")
         written.append(path)
     manifest_payload: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "reconstruction_id": reconstruction.reconstruction_id,
         "seed_transaction_hash": reconstruction.seed_transaction_hash,
         "chain_id": reconstruction.chain_id,

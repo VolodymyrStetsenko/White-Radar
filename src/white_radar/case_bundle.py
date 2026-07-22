@@ -15,7 +15,10 @@ BUNDLE_FILES = (
     "case.json",
     "report.md",
     "calls.csv",
+    "events.csv",
     "transfers.csv",
+    "state_changes.csv",
+    "storage_changes.csv",
     "entities.csv",
     "relationships.csv",
     "timeline.csv",
@@ -60,7 +63,8 @@ def render_investigation_report(case: InvestigationCase) -> str:
             f"Transaction `{case.transaction_hash}` executed on **{case.chain}** at block "
             f"`{case.block_number}` with status **{case.transaction_status.upper()}**. "
             f"The reconstruction contains {len(case.calls)} call frames, "
-            f"{len(case.transfers)} asset transfers, and {len(case.entities)} entities."
+            f"{len(case.events)} emitted events, {len(case.transfers)} asset transfers, "
+            f"and {len(case.entities)} entities."
         ),
         "",
         "This report describes observed execution and asset-flow evidence. Findings are factual "
@@ -113,6 +117,53 @@ def render_investigation_report(case: InvestigationCase) -> str:
     if case.warnings:
         lines.extend(["", "## Source limitations", ""])
         lines.extend(f"- {_plain(item)}" for item in case.warnings)
+
+    lines.extend(["", "## Emitted-event evidence", ""])
+    if case.events:
+        verified = sum(item.decode_confidence == "verified" for item in case.events)
+        lines.extend(
+            [
+                f"- Receipt logs retained: {len(case.events)}",
+                f"- Events decoded from verified ABIs: {verified}",
+                "- Full topic, payload-hash, ABI-source, and argument inventory: `events.csv`",
+                "",
+                "| Log | Emitter | Event | Confidence | Evidence |",
+                "|---:|---|---|---|---|",
+            ]
+        )
+        for event in case.events[:100]:
+            identity = event.event_signature or event.topic0 or "anonymous/unresolved"
+            lines.append(
+                "| {} | `{}` | `{}` | `{}` | `{}` |".format(
+                    event.log_index,
+                    _plain(event.address or "unknown"),
+                    _plain(identity),
+                    _plain(event.decode_confidence or "unresolved"),
+                    event.evidence_ref,
+                )
+            )
+        if len(case.events) > 100:
+            lines.append(
+                "\nThe table is capped at 100 rows; `events.csv` contains all "
+                f"{len(case.events)} rows."
+            )
+    else:
+        lines.append("- The transaction receipt contains no retained event logs.")
+
+    lines.extend(["", "## Pre/post state-change evidence", ""])
+    if case.state_diff:
+        lines.extend(
+            [
+                f"- Changed accounts: {len(case.state_diff.accounts)}",
+                f"- Changed storage slots: {case.state_diff.storage_change_count}",
+                f"- Evidence source: `{_plain(case.state_diff.source)}`",
+                f"- Bounded/truncated: **{'yes' if case.state_diff.truncated else 'no'}**",
+                "- Account changes: `state_changes.csv`",
+                "- Storage-slot changes: `storage_changes.csv`",
+            ]
+        )
+    else:
+        lines.append("- The configured RPC endpoint did not provide state-diff evidence.")
 
     lines.extend(["", "## Asset-flow summary", ""])
     if case.transfers:
@@ -365,6 +416,21 @@ def write_case_bundle(
         )
     root.mkdir(parents=True, exist_ok=True)
 
+    state_rows: list[dict[str, object]] = []
+    storage_rows: list[dict[str, object]] = []
+    if case.state_diff:
+        for account in case.state_diff.accounts:
+            account_data = account.to_dict()
+            account_data.pop("storage_changes", None)
+            state_rows.append(account_data)
+            storage_rows.extend(
+                {
+                    "address": account.address,
+                    **storage.to_dict(),
+                }
+                for storage in account.storage_changes
+            )
+
     artifacts: dict[str, str] = {
         "case.json": json.dumps(case.to_dict(), indent=2, sort_keys=True) + "\n",
         "report.md": render_investigation_report(case),
@@ -400,6 +466,35 @@ def write_case_bundle(
                 for item in case.calls
             ],
         ),
+        "events.csv": _csv_text(
+            (
+                "log_index",
+                "address",
+                "topic0",
+                "event_signature",
+                "event_name",
+                "arguments",
+                "abi_source",
+                "abi_sha256",
+                "decode_confidence",
+                "topics",
+                "data",
+                "data_bytes",
+                "data_sha256",
+                "data_truncated",
+                "evidence_ref",
+            ),
+            [
+                {
+                    **item.to_dict(),
+                    "arguments": json.dumps(
+                        item.arguments, sort_keys=True, separators=(",", ":")
+                    ),
+                    "topics": json.dumps(item.topics, separators=(",", ":")),
+                }
+                for item in case.events
+            ],
+        ),
         "transfers.csv": _csv_text(
             (
                 "transfer_id",
@@ -418,6 +513,25 @@ def write_case_bundle(
                 "evidence_ref",
             ),
             [item.to_dict() for item in case.transfers],
+        ),
+        "state_changes.csv": _csv_text(
+            (
+                "address",
+                "change_type",
+                "balance_before_wei",
+                "balance_after_wei",
+                "nonce_before",
+                "nonce_after",
+                "code_before_bytes",
+                "code_after_bytes",
+                "code_before_sha256",
+                "code_after_sha256",
+            ),
+            state_rows,
+        ),
+        "storage_changes.csv": _csv_text(
+            ("address", "slot", "before", "after"),
+            storage_rows,
         ),
         "entities.csv": _csv_text(
             (
@@ -466,7 +580,7 @@ def write_case_bundle(
         written.append(path)
 
     manifest_payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "case_id": case.case_id,
         "transaction_hash": case.transaction_hash,
         "chain_id": case.chain_id,

@@ -60,7 +60,10 @@ class TransactionContext:
     function_source: str | None
     decoded_arguments: dict[str, object]
     call_count: int
+    event_count: int
     transfer_count: int
+    state_account_change_count: int
+    storage_change_count: int
     trace_available: bool
 
     def to_dict(self) -> dict[str, object]:
@@ -289,7 +292,10 @@ def _context(
         function_source=case.root_call.source if case.root_call else None,
         decoded_arguments=dict(case.root_call.arguments) if case.root_call else {},
         call_count=len(case.calls),
+        event_count=len(case.events),
         transfer_count=len(case.transfers),
+        state_account_change_count=len(case.state_diff.accounts) if case.state_diff else 0,
+        storage_change_count=case.state_diff.storage_change_count if case.state_diff else 0,
         trace_available=case.trace_available,
     )
 
@@ -420,6 +426,7 @@ def reconstruct_attack_case(
     watchlist: Watchlist | None = None,
     token_metadata: TokenMetadataResolver | None = None,
     include_trace: bool = True,
+    include_state_diff: bool = True,
 ) -> AttackReconstruction:
     """Expand a seed transaction into a bounded, evidence-backed candidate incident graph."""
 
@@ -520,6 +527,7 @@ def reconstruct_attack_case(
                     resolver=resolver,
                     watchlist=watchlist,
                     include_trace=include_trace,
+                    include_state_diff=include_state_diff,
                     replay_prestate=False,
                 )
             except (RuntimeError, RpcError, ValueError) as exc:
@@ -614,7 +622,7 @@ def reconstruct_attack_case(
         "earliest or final incident transaction has been identified."
     )
     return AttackReconstruction(
-        schema_version=1,
+        schema_version=2,
         reconstruction_id=f"{chain.name}-{seed.transaction_hash[2:18]}-reconstruction",
         generated_at=utc_now(),
         chain=chain.name,

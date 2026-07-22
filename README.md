@@ -25,7 +25,8 @@ No watchlist entry is required. By default, the seed is expanded backward and fo
 command:
 
 1. reconstructs the seed transaction from its transaction, receipt, block, trace, logs, verified
-   ABI, proxy state, and historical replay evidence;
+   ABI, decoded events, pre/post account and storage changes, proxy state, and historical replay
+   evidence;
 2. derives an initial frontier from the origin and observed transfer endpoints;
 3. queries bounded normal, internal, ERC-20, ERC-721, and ERC-1155 history through Etherscan V2
    when configured, with a portable JSON-RPC block/log fallback;
@@ -49,7 +50,10 @@ The default destination is `evidence/<chain>-<transaction-prefix>-reconstruction
 | `report.md` | Human-readable executive summary, chronology, asset ledger, selector inventory, proxy context, entities, and evidence gaps |
 | `transactions.csv` | Seed, pre-seed, same-block, and post-seed transaction inventory with inclusion reasons |
 | `calls.csv` | Bounded execution-frame inventory across every reconstructed transaction |
+| `events.csv` | Receipt topics, bounded payloads, hashes, and verified-ABI event arguments |
 | `transfers.csv` | Native and standard token movement with raw and normalized amounts |
+| `state_changes.csv` | Pre/post balances, nonces, and runtime-code evidence for changed accounts |
+| `storage_changes.csv` | Pre/post values for changed contract storage slots |
 | `entities.csv` | Addresses, inferred kinds, labels, observed roles, and transaction membership |
 | `relationships.csv` | Cross-transaction call and transfer edges with evidence references |
 | `timeline.csv` | Block/transaction chronology plus execution and asset-flow order |
@@ -141,6 +145,7 @@ white-radar investigate \
 Useful controls:
 
 - `--no-trace` skips `debug_traceTransaction` for providers without trace access;
+- `--no-state-diff` skips Geth `prestateTracer` diff-mode collection;
 - `--no-replay` skips the historical `eth_call` at block minus one;
 - `--backward-blocks` and `--forward-blocks` set the search window around the seed;
 - `--max-hops`, `--max-transactions`, and `--max-addresses` bound graph expansion;
@@ -195,6 +200,15 @@ reconstructs a known transaction, while the guard observes only configured proto
 - contract creation and delegated execution observations;
 - exact trace availability and truncation state.
 
+### Events and state changes
+
+- every retained receipt log with emitter, topics, bounded data, original length, and SHA-256;
+- event names and arguments only when matched to a verified contract ABI;
+- indexed dynamic event values preserved as topic hashes because their original values are not
+  recoverable from the log alone;
+- bounded Geth `prestateTracer` diff-mode account, balance, nonce, code, and storage changes;
+- explicit provider-gap and truncation records instead of treating missing state as unchanged.
+
 ### Asset movement
 
 - native value from call frames, with top-level fallback when tracing is unavailable;
@@ -224,8 +238,8 @@ state, provider pruning, and service-address fan-out can create unresolved gaps.
 
 The report therefore distinguishes observed evidence from candidate linkage and records every
 limit and source gap. Bridge-aware cross-chain continuation, service/router classification,
-state-diff extraction, richer event decoding, checkpoints, and public-incident regression fixtures
-remain tracked in [ROADMAP.md](ROADMAP.md).
+checkpoints, revert-data decoding, and public-incident regression fixtures remain tracked in
+[ROADMAP.md](ROADMAP.md).
 
 ## Additional commands
 
@@ -255,8 +269,8 @@ white-radar health
 
 - fixed read-only JSON-RPC method allowlist;
 - chain-ID validation before analysis;
-- bounded call frames, receipt logs, asset transfers, ABI destinations, entities, and ERC-1155
-  batches;
+- bounded call frames, receipt logs, event payloads, state accounts, storage changes, asset
+  transfers, ABI destinations, entities, and ERC-1155 batches;
 - SQLite WAL, idempotent events, cursors, heartbeats, and alert outbox;
 - credential redaction and repository secret scanning;
 - deterministic case schema and artifact hashes;

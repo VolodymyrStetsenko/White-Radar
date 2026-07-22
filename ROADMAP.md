@@ -55,8 +55,8 @@ high-volume alert generation.
 
 ### Richer transaction evidence
 
-- [ ] optional `prestateTracer` diff-mode state-change extraction;
-- [ ] verified event-ABI decoding for indexed and non-indexed values beyond transfer standards;
+- [x] optional bounded `prestateTracer` diff-mode account and storage-change extraction;
+- [x] verified event-ABI decoding for indexed and non-indexed values beyond transfer standards;
 - [x] token symbol and decimals pinned to the investigation block;
 - [ ] ERC-721/1155 collection metadata pinned to the investigation block;
 - [ ] custom-error and revert-data decoding from verified interfaces;
