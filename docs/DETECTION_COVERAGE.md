@@ -1,7 +1,8 @@
 # Detection coverage
 
-White Radar is an observation and triage platform. Coverage is expressed as observable signals,
-not as a claim that one signal proves a vulnerability.
+White Radar is a transaction incident investigator with a quiet protocol guard. Coverage is
+expressed as reconstructable evidence and configured signals, not as a claim that one signal proves
+a vulnerability.
 
 The matrix aligns current capabilities with the
 [OWASP Smart Contract Top 10](https://owasp.org/www-project-smart-contract-top-10/) 2026
@@ -24,6 +25,15 @@ categories and the incident-management objectives in
 | Proxy and upgradeability | EIP-1967 implementation/admin/beacon state, upgrade logs, effective code hash, missing code, UUPS probe, multiple control planes | Strong |
 
 ## Signal families
+
+### Transaction reconstruction
+
+- confirmed transaction, receipt, containing block, status, gas, and fee evidence;
+- bounded exact mined call tree when `callTracer` is available;
+- native, ERC-20, ERC-721, and ERC-1155 asset movement;
+- entity roles and evidence-backed call/transfer relationships;
+- proxy implementation context and verified selector identity;
+- portable case bundles with evidence references and integrity hashes.
 
 ### Control-plane monitoring
 
@@ -62,7 +72,7 @@ categories and the incident-management objectives in
 - exact normalized-code families;
 - bounded code-similarity relationships;
 - proxy implementation/admin/beacon relationships;
-- pending sender-to-contract relationships.
+- promoted pending sender-to-contract relationships; routine calls remain aggregate telemetry.
 
 ## Incident workflow mapping
 
@@ -70,7 +80,7 @@ categories and the incident-management objectives in
 |---|---|
 | Preparation | Chain configuration, protocol inventory, policy baselines, invariants, contacts, service units |
 | Detection | Confirmed scanner, pending observer, proxy logs/state, simulation, traces, drift, invariant transitions |
-| Analysis | Explainable scoring, ABI labels, identity graph, evidence links, reports |
+| Analysis | Transaction reconstruction, ABI labels, asset-flow and entity graphs, evidence bundles |
 | Response coordination | Incident SLA, owner, audited state transitions, Telegram cases and digests |
 | Recovery monitoring | Invariant recovery, profile refresh, confirmed follow-up, health checks |
 | Improvement | JSONL exports, incident history, policy digest, regression tests |
@@ -85,6 +95,7 @@ categories and the incident-management objectives in
 - Off-chain compromise, social engineering, leaked signers, and governance operations require
   external telemetry.
 - Cross-chain messages require source/destination correlation that is not yet implemented.
+- One seed transaction does not yet enumerate later transactions made by every involved address.
 - Contract-level signals cannot identify the real-world controller of an address.
 
 Coverage should therefore be evaluated per protocol as a set of configured data sources,

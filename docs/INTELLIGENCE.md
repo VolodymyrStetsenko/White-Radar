@@ -3,6 +3,19 @@
 White Radar builds reproducible technical context from confirmed chain state, provider
 observations, verified metadata, and local protocol configuration.
 
+## Transaction investigation
+
+```bash
+white-radar investigate \
+  --chain ethereum \
+  --tx-hash 0xCONFIRMED_TRANSACTION_HASH
+```
+
+The investigator reconstructs the transaction receipt, exact call graph when available, standard
+token and native-value flows, entities, relationships, proxy context, and historical replay into a
+hash-manifested case bundle. It does not require protocol inventory. See
+[Transaction incident investigation](INVESTIGATION.md).
+
 ## Runtime fingerprints
 
 For each discovered contract, White Radar stores:
@@ -34,7 +47,8 @@ white-radar abi \
   --address 0x1111111111111111111111111111111111111111
 ```
 
-The selector catalog enriches pending cases with function identity and a source/digest trail.
+The selector catalog enriches transaction investigations and promoted pending cases with function
+identity and a source/digest trail.
 
 ## State-pinned runtime intelligence
 
@@ -66,6 +80,7 @@ The proxy snapshot resolves:
 
 - EIP-1967 implementation, admin, and beacon slots;
 - beacon implementation through `implementation()`;
+- legacy/custom proxy implementation through direct `implementation()`;
 - effective implementation;
 - implementation code size and normalized SHA-256;
 - UUPS `proxiableUUID()` compatibility;
@@ -122,6 +137,10 @@ implementation, admin, or beacon state produce a `contract_profile_changed` even
 and current observations.
 
 ## Incident reports
+
+Transaction investigations use a multi-artifact bundle containing canonical JSON, CSV, Markdown,
+HTML, GraphML, and an integrity manifest. The `report` command below remains available for
+event-driven protocol guard cases stored in SQLite.
 
 ```bash
 white-radar report --event-id CASE_ID --output evidence/CASE_ID.md

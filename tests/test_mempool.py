@@ -81,6 +81,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
                         chain_id=1,
                         address=WATCHED_ADDRESS,
                         protocol="Example",
+                        critical_selectors=("0x12345678",),
                     ),
                 ),
                 (),
@@ -197,7 +198,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
                         chain_id=1,
                         address=WATCHED_ADDRESS,
                         protocol="Example",
-                        critical_selectors=(),
+                        critical_selectors=("0x12345678",),
                     ),
                 ),
                 (),
@@ -271,10 +272,51 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
                 policy_book=policy_book,
             )
             event = store.recent_events(1)[0]
-            self.assertEqual(event.score, 100)
+            self.assertGreaterEqual(event.score, 70)
+            self.assertEqual(event.metadata["policy_correlation_bonus"], 20)
+            self.assertIn("correlated policy deviations", event.recommended_action)
             self.assertFalse(event.metadata["policy_baseline_match"])
             self.assertEqual(len(event.metadata["policy_findings"]), 3)
             self.assertIsNotNone(store.incident_for_event(event.event_id))
+
+    async def test_aggregates_routine_token_calls_without_events_or_identity_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = settings_for(root)
+            store = RadarStore(settings.app.database_path)
+            store.initialize()
+            watchlist = Watchlist(
+                (
+                    ContractWatch(
+                        chain_id=1,
+                        address=WATCHED_ADDRESS,
+                        protocol="Example Token",
+                    ),
+                ),
+                (),
+            )
+            transaction = {
+                "hash": "0x" + "ef" * 32,
+                "from": "0x" + "22" * 20,
+                "to": WATCHED_ADDRESS,
+                "input": "0xa9059cbb" + "00" * 64,
+                "value": "0x0",
+            }
+            notifier = TelegramNotifier(settings.telegram, True, 1, 1)
+            for _ in range(3):
+                await _handle_message(
+                    json.dumps({"params": {"result": transaction}}),
+                    rpc=FakePendingRpc(None),  # type: ignore[arg-type]
+                    chain=ETHEREUM,
+                    watchlist=watchlist,
+                    store=store,
+                    notifier=notifier,
+                )
+            self.assertEqual(store.counts()["events"], 0)
+            self.assertEqual(store.intelligence_counts()["identity_nodes"], 0)
+            telemetry = store.pending_telemetry_since(hours=1)
+            self.assertEqual(len(telemetry), 1)
+            self.assertEqual(telemetry[0]["observation_count"], 3)
 
     async def test_ignores_invalid_unresolved_and_unwatched_messages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

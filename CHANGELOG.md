@@ -4,6 +4,17 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- repositioned White Radar around transaction-centric incident investigation and a quiet protocol
+  guard;
+- added `white-radar investigate` for confirmed transactions without a watchlist requirement;
+- added bounded call-tree reconstruction with stable frame paths and graceful trace degradation;
+- added native, ERC-20, ERC-721, ERC-1155 single, and ERC-1155 batch transfer reconstruction;
+- added entities, evidence-backed relationships, two-phase timelines, and factual findings;
+- added canonical JSON, CSV tables, Markdown, interactive HTML, GraphML, and SHA-256 case manifests;
+- added proxy-aware implementation ABI fallback and legacy direct `implementation()` resolution;
+- pinned investigation replay and proxy context to historical transaction state;
+- converted low-evidence pending traffic and routine token calls into hourly telemetry aggregates;
+- limited pending cases, identity edges, warning logs, and Telegram delivery to promoted evidence;
 - added ordered HTTP and WebSocket RPC fallback configuration;
 - added verified ABI catalogs, Ethereum selector derivation, and bounded static argument decoding;
 - added state-pinned transaction simulation with optional bounded call-graph tracing;
@@ -12,7 +23,7 @@ All notable changes are documented here.
 - enriched pending, proxy-upgrade, Telegram, report, health, and status evidence;
 - added dedicated ABI, simulation, proxy, invariant, storage, and RPC failover tests;
 - rebuilt architecture, coverage, operations, policy, intelligence, Telegram, privacy, and threat
-  documentation around the integrated protocol-defense platform.
+  documentation around the transaction-investigation product.
 
 ## 0.3.0 — 2026-07-21
 

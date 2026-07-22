@@ -57,6 +57,7 @@
 - bounded policy and ABI document sizes;
 - bounded ABI entry count and static argument count;
 - bounded trace frames and touched addresses;
+- bounded receipt logs, transfer records, entities, ABI destinations, and graph rendering;
 - bounded graph traversal depth;
 - bounded refresh and list command limits;
 - bounded HTTP retries and reconnect backoff.
@@ -64,5 +65,5 @@
 ## Security regression gates
 
 Every change that affects RPC, persistence, parsing, simulation, trace handling, or secret
-boundaries must include deterministic tests. CI enforces formatting, lint, strict type checking,
-coverage, bytecode compilation, packaging, and secret-pattern scanning.
+boundaries must include deterministic tests. CI enforces lint, strict type checking, coverage,
+bytecode compilation, and secret-pattern scanning.

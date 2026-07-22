@@ -4,7 +4,7 @@ import unittest
 from typing import Any
 
 from white_radar.enrichment import EIP1967_SLOTS
-from white_radar.proxy import PROXIABLE_UUID_SELECTOR, inspect_proxy
+from white_radar.proxy import IMPLEMENTATION_SELECTOR, PROXIABLE_UUID_SELECTOR, inspect_proxy
 
 
 def address_word(address: str | None) -> str:
@@ -62,6 +62,28 @@ class ProxyTests(unittest.TestCase):
             "implementation_without_runtime_code",
             {finding.code for finding in snapshot.findings},
         )
+
+    def test_resolves_legacy_proxy_through_implementation_call(self) -> None:
+        implementation = "0x" + "77" * 20
+
+        class LegacyProxyRpc(ProxyRpc):
+            def storage_at(self, address: str, slot: str, block: str = "latest") -> str:
+                return address_word(None)
+
+            def eth_call(self, transaction: dict[str, object], block: str = "latest") -> str:
+                if transaction["data"] == IMPLEMENTATION_SELECTOR:
+                    return address_word(implementation)
+                if transaction["data"] == PROXIABLE_UUID_SELECTOR:
+                    return EIP1967_SLOTS["implementation"]
+                raise AssertionError("unexpected selector")
+
+        snapshot = inspect_proxy(
+            LegacyProxyRpc(),  # type: ignore[arg-type]
+            "0x" + "11" * 20,
+            block_number=199,
+        )
+        self.assertEqual(snapshot.implementation, implementation)
+        self.assertEqual(snapshot.effective_implementation, implementation)
 
 
 if __name__ == "__main__":

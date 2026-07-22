@@ -181,6 +181,7 @@ def render_digest(
     hours: int,
     incidents: list[IncidentRecord] | None = None,
     overdue_incident_ids: set[str] | None = None,
+    pending_telemetry: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a compact Telegram HTML digest without claiming exploitability."""
 
@@ -219,6 +220,22 @@ def render_digest(
         lines.extend(["", "<b>Signals</b>"])
         for name, count in event_types.most_common():
             lines.append(f"• {html.escape(name)}: {count}")
+    if pending_telemetry:
+        observation_count = sum(
+            int(item.get("observation_count") or 0) for item in pending_telemetry
+        )
+        lines.extend(
+            [
+                "",
+                "<b>Aggregated pending telemetry</b>",
+                f"Routine observations {observation_count} · groups {len(pending_telemetry)}",
+            ]
+        )
+        for item in pending_telemetry[:5]:
+            protocol = html.escape(str(item.get("protocol") or "unlabeled"))
+            selector = html.escape(str(item.get("selector") or "0x"))
+            count = int(item.get("observation_count") or 0)
+            lines.append(f"• {protocol} · <code>{selector}</code>: {count}")
     if events:
         lines.extend(["", "<b>Highest priority cases</b>"])
         top = sorted(events, key=lambda event: (event.score, event.observed_at), reverse=True)[:8]

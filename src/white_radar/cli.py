@@ -13,6 +13,7 @@ from pathlib import Path
 
 from white_radar import __version__
 from white_radar.abi import AbiResolver
+from white_radar.case_bundle import write_case_bundle
 from white_radar.config import (
     ADDRESS_RE,
     ConfigurationError,
@@ -23,6 +24,7 @@ from white_radar.config import (
     load_settings,
     load_watchlist,
 )
+from white_radar.investigation import investigate_transaction, validate_transaction_hash
 from white_radar.logging import configure_logging, log_context
 from white_radar.mempool import watch_pending_transactions
 from white_radar.models import ChainConfig, IncidentStatus, RadarEvent
@@ -41,7 +43,7 @@ LOGGER = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="white-radar",
-        description="Multi-chain protocol defense monitoring and incident intelligence.",
+        description="Transaction-centric EVM incident investigation and quiet protocol guard.",
     )
     parser.add_argument("--version", action="version", version=f"White Radar {__version__}")
     parser.add_argument(
@@ -52,6 +54,40 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="Create local config and inventory from sanitized examples.")
+
+    investigate = subparsers.add_parser(
+        "investigate",
+        help="Reconstruct one confirmed transaction into an evidence case bundle.",
+    )
+    investigate.add_argument("--chain", required=True, help="One configured chain name.")
+    investigate.add_argument(
+        "--tx-hash",
+        required=True,
+        help="Confirmed transaction hash; no watchlist entry is required.",
+    )
+    investigate.add_argument(
+        "--output",
+        type=Path,
+        help="Case directory; defaults to evidence/<chain>-<transaction-prefix>.",
+    )
+    investigate.add_argument(
+        "--no-trace",
+        action="store_false",
+        dest="trace",
+        help="Skip debug_traceTransaction when the provider does not support it.",
+    )
+    investigate.add_argument(
+        "--no-replay",
+        action="store_false",
+        dest="replay",
+        help="Skip the read-only eth_call replay at transaction block minus one.",
+    )
+    investigate.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace known files in an existing case directory.",
+    )
+    investigate.set_defaults(trace=True, replay=True)
 
     doctor = subparsers.add_parser("doctor", help="Validate configuration and RPC identity.")
     doctor.add_argument("--online", action="store_true", help="Call enabled RPC endpoints.")
@@ -461,6 +497,7 @@ def cmd_digest(
         hours=bounded_hours,
         incidents=incidents,
         overdue_incident_ids={item.incident_id for item in store.overdue_incidents(limit=500)},
+        pending_telemetry=store.pending_telemetry_since(hours=bounded_hours),
     )
     print(digest)
     if send and not notifier.send_digest(digest):
@@ -557,6 +594,66 @@ def _validated_address(address: str) -> str:
     return normalized
 
 
+def cmd_investigate(
+    settings: Settings,
+    watchlist: Watchlist,
+    store: RadarStore,
+    *,
+    chain_name: str,
+    tx_hash: str,
+    output: Path | None,
+    trace: bool,
+    replay: bool,
+    overwrite: bool,
+) -> int:
+    chain = settings.chain_by_name(chain_name)
+    normalized_hash = validate_transaction_hash(tx_hash)
+    resolver = (
+        AbiResolver(
+            store,
+            timeout=settings.app.request_timeout_seconds,
+            retries=settings.app.request_retries,
+        )
+        if settings.analysis.abi_resolution_enabled
+        else None
+    )
+    case = investigate_transaction(
+        _rpc_for_chain(settings, chain),
+        chain,
+        normalized_hash,
+        resolver=resolver,
+        watchlist=watchlist,
+        include_trace=trace,
+        replay_prestate=replay,
+    )
+    destination = (
+        output.expanduser().resolve()
+        if output
+        else (settings.root / "evidence" / case.case_id).resolve()
+    )
+    try:
+        bundle = write_case_bundle(case, destination, overwrite=overwrite)
+    except FileExistsError as exc:
+        raise ValueError(str(exc)) from exc
+    print(
+        json.dumps(
+            {
+                "case_id": case.case_id,
+                "transaction_hash": case.transaction_hash,
+                "status": case.transaction_status,
+                "calls": len(case.calls),
+                "transfers": len(case.transfers),
+                "entities": len(case.entities),
+                "findings": len(case.findings),
+                "warnings": list(case.warnings),
+                "bundle": bundle.to_dict(),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_simulate(
     settings: Settings,
     watchlist: Watchlist,
@@ -643,7 +740,19 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(cmd_init(args.config))
     try:
         settings, watchlist, store, notifier = _load_runtime(args.config)
-        if args.command == "doctor":
+        if args.command == "investigate":
+            code = cmd_investigate(
+                settings,
+                watchlist,
+                store,
+                chain_name=args.chain,
+                tx_hash=args.tx_hash,
+                output=args.output,
+                trace=args.trace,
+                replay=args.replay,
+                overwrite=args.overwrite,
+            )
+        elif args.command == "doctor":
             code = cmd_doctor(settings, watchlist, online=args.online)
         elif args.command == "run-once":
             results = _scan_once(settings, watchlist, store, notifier, args.chain)

@@ -42,6 +42,11 @@ class CliTests(unittest.TestCase):
             ).command,
             "simulate",
         )
+        investigation = parser.parse_args(
+            ["investigate", "--chain", "ethereum", "--tx-hash", "0x" + "11" * 32]
+        )
+        self.assertTrue(investigation.trace)
+        self.assertTrue(investigation.replay)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"

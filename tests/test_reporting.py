@@ -35,6 +35,20 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("case-123", digest)
         empty = render_digest([], {"ethereum": ETHEREUM}, hours=0)
         self.assertIn("No cases", empty)
+        telemetry = render_digest(
+            [],
+            {"ethereum": ETHEREUM},
+            hours=1,
+            pending_telemetry=[
+                {
+                    "protocol": "Example Token",
+                    "selector": "0xa9059cbb",
+                    "observation_count": 42,
+                }
+            ],
+        )
+        self.assertIn("Aggregated pending telemetry", telemetry)
+        self.assertIn("Routine observations 42", telemetry)
 
     def test_report_and_digest_include_incident_workflow(self) -> None:
         event = sample_event()

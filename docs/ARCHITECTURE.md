@@ -2,7 +2,7 @@
 
 ## Design properties
 
-White Radar is built around seven engineering properties:
+White Radar is built around eight engineering properties:
 
 1. the network boundary is read-only;
 2. every analysis result identifies its chain and, where applicable, its pinned block;
@@ -11,14 +11,17 @@ White Radar is built around seven engineering properties:
 5. every priority score contains machine-readable findings and human-readable reasons;
 6. delivery failures are isolated from evidence ingestion;
 7. runtime health and evidence provenance are queryable.
+8. transaction investigation remains useful when optional trace or explorer enrichment is absent.
 
 ## Component map
 
 | Component | Responsibility | Principal input |
 |---|---|---|
 | `JsonRpcClient` | Read-method enforcement, JSON-RPC calls, HTTP failover | Untrusted provider responses |
+| Incident Investigator | One-transaction execution, asset-flow, entity, finding, and timeline reconstruction | Confirmed transaction hash |
+| Case bundle writer | Canonical JSON, CSV tables, Markdown, HTML/GraphML graph, integrity manifest | Normalized investigation case |
 | `ChainScanner` | Confirmed ranges, deployments, control events, invariant cycles | Confirmation-safe chain state |
-| `watch_pending_transactions` | Destination-filtered pending intake and reconnect loop | Partial provider mempool |
+| `watch_pending_transactions` | Quiet inventory guard, telemetry aggregation, and evidence promotion | Partial provider mempool |
 | `ContractEnricher` | Sourcify, Etherscan V2, and EIP-1967 metadata | Explorer and storage reads |
 | `AbiResolver` | Verified ABI catalog, Ethereum selectors, static argument decoding | Etherscan API V2 |
 | Simulation engine | State-pinned `eth_call`, optional `callTracer`, bounded findings | Selected transaction metadata |
@@ -29,21 +32,18 @@ White Radar is built around seven engineering properties:
 | Policy engine | Sender, selector, value, SLA, labels, and invariants | Bounded TOML policy |
 | Correlation engine | Typed nodes and evidence-backed relationships | Chain and operator inventory |
 | `RadarStore` | Cursors, profiles, ABI catalogs, invariant state, incidents, outbox | Local SQLite |
-| Reporting layer | Telegram cards, digests, Markdown reports, JSONL | Normalized events |
+| Reporting layer | Investigation bundles, Telegram cards, digests, Markdown reports, JSONL | Cases and normalized events |
 
 ## Data flow
 
 ```mermaid
 flowchart TD
-    Provider["RPC providers"] --> Boundary["Read-only RPC boundary"]
-    Explorer["Sourcify / Etherscan"] --> Metadata["Metadata and ABI resolver"]
-    Boundary --> Confirmed["Confirmed pipeline"]
-    Boundary --> Pending["Pending pipeline"]
-    Confirmed --> Analyze["Proxy / invariant / trace / fingerprint"]
-    Pending --> Analyze
-    Metadata --> Analyze
-    Analyze --> Evidence["Evidence store and incident workflow"]
-    Evidence --> Delivery["Telegram / reports / JSONL / health"]
+    Seed["Confirmed transaction hash"] --> Boundary["Read-only RPC boundary"]
+    Explorer["Sourcify / Etherscan"] --> Analyze["Receipt / trace / ABI / proxy / asset flow"]
+    Boundary --> Analyze
+    Guard["Quiet protocol guard"] -->|"promoted evidence"| Analyze
+    Analyze --> Evidence["Case model and evidence store"]
+    Evidence --> Delivery["Case bundle / Telegram / health"]
 ```
 
 ## Read-only RPC boundary
@@ -62,6 +62,24 @@ constructing, signing, replacing, or broadcasting a transaction.
 Each chain can define a primary endpoint and ordered fallbacks. The active endpoint changes after
 a transport failure, malformed response, or method-unavailable response. An RPC execution error is
 returned directly because it may be part of the evidence.
+
+## Transaction investigation pipeline
+
+1. Validate a confirmed transaction hash and the configured RPC chain identity.
+2. Read and cross-check the transaction and receipt hashes.
+3. Cross-check the transaction, receipt, and containing-block identities before combining them.
+4. Request an exact mined `callTracer` trace when supported.
+5. Flatten nested calls into stable bounded paths and resolve verified selectors.
+6. Decode native value and standard ERC-20, ERC-721, and ERC-1155 transfer evidence.
+7. Inspect root proxy state and resolve implementation ABI context at the transaction block.
+8. Classify entities from historical runtime code and observed roles.
+9. Build evidence-referenced relationships, findings, and separate execution/asset timelines.
+10. Optionally corroborate the result with `eth_call` at transaction block minus one.
+11. Write canonical JSON, CSV tables, Markdown, interactive HTML, GraphML, and a SHA-256 manifest.
+
+Trace, explorer, and replay data are optional enrichments. Transaction and receipt evidence remains
+available when one of those sources is unavailable. See [Transaction incident
+investigation](INVESTIGATION.md).
 
 ## Confirmed-block pipeline
 
@@ -91,15 +109,20 @@ The pending observer:
 2. resolves ordered WebSocket endpoints and subscribes with provider-aware semantics;
 3. receives full filtered transaction objects or performs a read-only hash lookup;
 4. discards destinations outside the inventory;
-5. computes selector, calldata length, fee/value fields, and policy findings;
-6. resolves a verified ABI label when enabled;
-7. optionally runs state-pinned simulation after the configured score threshold;
-8. stores bounded findings, a calldata-independent transaction fingerprint, and graph evidence;
-9. opens an incident when the resulting priority reaches the incident threshold;
-10. writes a heartbeat while the subscription is active and reconnects with bounded backoff.
+5. classifies routine token selectors and evaluates protocol-specific policy findings;
+6. aggregates low-evidence observations into hourly telemetry without event or graph creation;
+7. resolves a verified ABI only after evidence promotes a transaction for review;
+8. optionally runs state-pinned simulation after the configured threshold;
+9. stores a bounded case and graph evidence only for promoted observations;
+10. opens an incident and sends Telegram only when configured priority thresholds are met;
+11. writes a heartbeat while the subscription is active and reconnects with bounded backoff.
 
 Pending visibility is intentionally described as provider evidence. It is not a global mempool
 consensus view.
+
+Routine ERC-20 `transfer`, `approve`, and `transferFrom` traffic has zero base priority. It is
+retained as aggregate volume and cannot create per-transaction identity nodes or Telegram messages
+without protocol-specific evidence.
 
 ## State-pinned simulation
 
@@ -122,9 +145,9 @@ Full calldata and return data are not persisted by this layer.
 ## Proxy intelligence
 
 Proxy inspection is pinned to one block and reads the EIP-1967 implementation, admin, and beacon
-slots. Beacon proxies are resolved through `implementation()`. The effective implementation is
-fingerprinted, checked for runtime code, and probed through `proxiableUUID()` for UUPS
-compatibility.
+slots. Beacon proxies and legacy/custom direct proxies can be resolved through `implementation()`.
+The effective implementation is fingerprinted, checked for runtime code, and probed through
+`proxiableUUID()` for UUPS compatibility.
 
 Upgrade events are enriched with the full snapshot so the case records both the event log and the
 resulting control state.
@@ -165,7 +188,7 @@ and bytecode identities. Relationships include:
 
 - `DEPLOYED`;
 - `CONTAINS`;
-- `OBSERVED_PENDING_CALL_TO`;
+- `OBSERVED_PENDING_CALL_TO` for promoted guard cases only;
 - `DELEGATES_TO`;
 - `ADMINISTERED_BY`;
 - `USES_BEACON`;
@@ -185,6 +208,7 @@ holds:
 - ABI catalogs and invariant states;
 - graph nodes and edges;
 - normalized events;
+- aggregated pending telemetry buckets;
 - incidents and append-only transition history;
 - service heartbeats;
 - alert-outbox state.

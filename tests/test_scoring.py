@@ -36,6 +36,16 @@ class ScoringTests(unittest.TestCase):
         self.assertIn("state-pinned simulation", result.recommended_action)
         self.assertIn("protocol change window", result.recommended_action)
 
+    def test_routine_pending_selector_has_zero_base_priority(self) -> None:
+        result = score_pending(
+            protocol="Example Token",
+            critical_selector=False,
+            native_value_wei=0,
+            routine_selector=True,
+        )
+        self.assertEqual(result.score, 0)
+        self.assertIn("aggregated telemetry", result.recommended_action)
+
     def test_runtime_profile_drift_is_high_priority(self) -> None:
         result = score_profile_change(
             changed_fields=frozenset({"bytecode_sha256", "implementation"}),

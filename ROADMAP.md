@@ -1,60 +1,104 @@
 # Engineering roadmap
 
-## Delivered platform
+## Product direction
 
-- [x] read-only multi-chain JSON-RPC boundary with chain-ID validation;
-- [x] confirmed-block scanners with confirmations, cursors, bounded ranges, and idempotency;
-- [x] primary/fallback HTTP and WebSocket provider configuration;
-- [x] top-level and inventory-scoped internal contract-deployment intelligence;
-- [x] EIP-1967, beacon, implementation, UUPS, and upgrade-event analysis;
-- [x] verified ABI selector catalogs and bounded static argument decoding;
-- [x] watchlist-filtered pending transaction intelligence;
-- [x] deterministic sender, selector, value, and SLA baselines;
-- [x] state-pinned `eth_call` simulation and optional bounded call-graph tracing;
-- [x] stateful protocol invariants with violation and recovery transitions;
-- [x] runtime-code normalization, hashing, similarity families, and drift detection;
-- [x] evidence-backed identity graph;
-- [x] incident workflow, reports, Telegram cards, digests, JSONL export, and health checks;
-- [x] Docker, hardened systemd units, CI, coverage gates, and secret scanning.
+White Radar is developed as a transaction-centric EVM incident investigator with a quiet,
+protocol-specific guard. Investigation depth and evidence quality take priority over broad,
+high-volume alert generation.
 
-## Engineering priorities
+## Delivered investigation foundation
 
-### Signal precision
+- [x] one-command investigation from a confirmed transaction hash without a watchlist requirement;
+- [x] transaction, receipt, block, fee, and execution-status reconstruction;
+- [x] bounded Geth `callTracer` call tree with stable frame paths;
+- [x] native, ERC-20, ERC-721, ERC-1155 single, and bounded ERC-1155 batch transfer extraction;
+- [x] entity roles, historical code classification, call edges, and asset-flow edges;
+- [x] execution and receipt-log timeline phases with explicit evidence references;
+- [x] verified ABI selector resolution and proxy-implementation fallback;
+- [x] EIP-1967, beacon, UUPS, and legacy `implementation()` proxy context;
+- [x] historical read-only replay at transaction block minus one;
+- [x] canonical JSON, CSV tables, Markdown report, interactive HTML graph, GraphML, and SHA-256
+  manifest;
+- [x] graceful degradation when trace, explorer, or archival replay data is unavailable;
+- [x] routine mempool token calls aggregated as telemetry instead of per-transaction cases;
+- [x] policy- and critical-selector-based pending promotion;
+- [x] read-only multi-chain RPC boundary, chain-ID validation, provider failover, and secret scanning.
 
-- [ ] event-log ABI decoding with indexed/non-indexed argument support;
-- [ ] rolling statistical baselines for sender, selector, value, gas, and call-frequency changes;
-- [ ] protocol-specific invariant templates for common proxy, vault, oracle, bridge, and governance
-  interfaces;
-- [ ] multi-signal incident correlation across pending, confirmed, invariant, proxy, and drift
-  observations;
-- [ ] reorg reconciliation records for deep or provider-inconsistent reorganizations.
+## Highest-priority investigation work
 
-### Protocol context
+### Bounded multi-transaction fund flow
 
-- [ ] signed policy-pack provenance and revision history;
-- [ ] official repository, release manifest, governance, multisig, and security-contact adapters;
-- [ ] bytecode-family labels sourced from verified deployment manifests;
-- [ ] cross-chain protocol identity resolution with explicit evidence provenance;
-- [ ] versioned interface catalogs for standard proxy, vault, token, oracle, and governance systems.
+- [ ] expand forward and backward from seed entities inside explicit block/time, depth, and
+  transaction-count limits;
+- [ ] combine normal transactions, internal value transfers, and standard token transfers into one
+  cross-transaction graph;
+- [ ] maintain per-hop provenance and raw integer asset accounting without implying ownership or
+  intent;
+- [ ] deduplicate cycles, high-volume exchange routers, and service addresses;
+- [ ] checkpoint long investigations and resume deterministically;
+- [ ] export graph slices and per-asset flow ledgers for each investigation branch.
 
-### Reliability and scale
+### Richer transaction evidence
 
-- [ ] PostgreSQL storage backend with transactional cursor compatibility;
-- [ ] durable enrichment and alert queues;
-- [ ] Prometheus/OpenTelemetry metrics and multi-host service-level objectives;
-- [ ] provider quorum reads for critical control-state and invariant checks;
-- [ ] deterministic replay harness for recorded blocks and transaction fixtures;
-- [ ] retention, partitioning, backup verification, and evidence-integrity tooling.
+- [ ] optional `prestateTracer` diff-mode state-change extraction;
+- [ ] verified event-ABI decoding for indexed and non-indexed values beyond transfer standards;
+- [ ] token symbol, decimals, and collection metadata pinned to the investigation block;
+- [ ] custom-error and revert-data decoding from verified interfaces;
+- [ ] mapping between trace-emitted logs and their internal call frames when the provider supports
+  log-aware tracing;
+- [ ] create-address derivation and CREATE2 salt/init-code evidence.
 
-### Incident operations
+### Cross-domain continuation
 
-- [ ] on-call, case-management, and disclosure-system adapters;
-- [ ] configurable escalation matrices and acknowledgement policies;
-- [ ] case bundles with manifests, hashes, timelines, and machine-readable evidence indexes;
-- [ ] operator dashboards for chain health, signal volume, open incidents, and policy coverage;
-- [ ] regression corpus derived from public incident postmortems and sanitized protocol fixtures.
+- [ ] evidence-backed bridge deposit and withdrawal pairing;
+- [ ] explicit chain-transition nodes and message identifiers;
+- [ ] configurable continuation across Ethereum, Base, Arbitrum, OP Mainnet, Polygon, and other
+  supported EVM chains;
+- [ ] source-specific confidence and unresolved-bridge records.
 
-## Design constraints
+### Entity intelligence
 
-Future work must preserve deterministic evidence, bounded resource use, explicit chain/block
-context, credential redaction, and the read-only RPC boundary.
+- [ ] pluggable public label sources with source, timestamp, and confidence fields;
+- [ ] protocol, multisig, bridge, exchange, router, relayer, and service classification;
+- [ ] local analyst labels with append-only revision history;
+- [ ] code-family and deployer-cluster context attached to investigation entities;
+- [ ] explicit conflict handling when sources disagree.
+
+## Quiet guard precision
+
+- [ ] rolling selector, sender, value, gas, and call-frequency baselines;
+- [ ] protocol-specific invariant templates for proxies, vaults, bridges, oracles, and governance;
+- [ ] multi-signal promotion across pending, confirmed, invariant, proxy, and runtime-drift evidence;
+- [ ] stateful suppression windows and explainable alert grouping;
+- [ ] reorg reconciliation for promoted observations;
+- [ ] Telegram case links that reference generated evidence bundles rather than raw traffic.
+
+## Investigation operations
+
+- [ ] case registry with analyst notes, tags, ownership, and append-only disposition history;
+- [ ] comparison of two transaction cases or two protocol-state snapshots;
+- [ ] signed export manifests and optional external timestamping;
+- [ ] reproducible investigation recipes containing chain, seed, limits, providers, and source
+  digests;
+- [ ] searchable local index across calls, selectors, contracts, transfers, and findings;
+- [ ] operator dashboard for investigation progress, source gaps, and evidence coverage.
+
+## Reliability and scale
+
+- [ ] deterministic replay corpus from public transactions and sanitized protocol fixtures;
+- [ ] provider capability discovery for trace, archival state, batch calls, and log limits;
+- [ ] quorum reads for critical receipt, block, proxy, and state-diff evidence;
+- [ ] durable work queue and PostgreSQL backend for multi-host investigation workers;
+- [ ] Prometheus/OpenTelemetry metrics, resource budgets, and service-level objectives;
+- [ ] retention, encrypted backup verification, and evidence-integrity audits.
+
+## Engineering constraints
+
+All future work must preserve:
+
+- read-only RPC semantics and the absence of signing or broadcasting paths;
+- deterministic evidence references and explicit chain/block context;
+- bounded resource use and operator-controlled investigation expansion;
+- credential redaction and repository secret scanning;
+- source attribution, uncertainty, and graceful degradation;
+- a strict distinction between observed evidence, derived findings, and analyst conclusions.

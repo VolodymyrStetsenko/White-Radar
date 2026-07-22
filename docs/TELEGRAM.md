@@ -1,6 +1,7 @@
 # Telegram alerts
 
-White Radar renders evidence-first Telegram case cards.
+White Radar renders evidence-first Telegram cards for promoted guard cases. Transaction
+investigation itself writes a local evidence bundle and does not require Telegram.
 
 ## Case fields
 
@@ -25,8 +26,8 @@ All dynamic text is HTML-escaped before delivery.
 
 ## Delivery controls
 
-`minimum_score` controls delivery, not evidence collection. Lower-priority events remain in
-SQLite for search, reporting, and export.
+`minimum_score` controls case delivery. Routine pending token traffic is not an event: it remains in
+hourly aggregate telemetry and cannot produce an individual Telegram card.
 
 ```toml
 [telegram]
@@ -68,6 +69,7 @@ The digest contains:
 - network and event-type totals;
 - open and overdue incident counts;
 - highest-priority case summaries.
+- aggregate pending telemetry totals and the busiest protocol/selector groups.
 
 Printing is the default. `--send` requires Telegram enabled, credentials present, and dry-run
 disabled.
