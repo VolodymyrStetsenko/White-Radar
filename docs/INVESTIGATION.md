@@ -1,231 +1,266 @@
-# Transaction incident investigation
+# Transaction incident reconstruction
 
 ## Purpose
 
-The White Radar Incident Investigator reconstructs one confirmed EVM transaction into a bounded,
-portable, and reproducible evidence case. It is designed for post-incident triage, suspicious
-transaction review, protocol-change validation, public postmortem research, and regression fixture
-construction.
+White Radar reconstructs a bounded candidate incident chain from one confirmed EVM transaction
+hash. The seed can be an entry, middle, or exit transaction. The engine searches before and after
+the seed, identifies evidence-linked candidates, performs a complete per-transaction
+reconstruction for each selected candidate, and exports one reviewable evidence bundle.
 
-The investigator reports observed execution and asset flow. It does not infer malicious intent
-from a transfer, selector, deep call graph, or proxy pattern alone.
+The result supports incident triage, asset-flow review, protocol postmortems, suspicious
+transaction analysis, regression fixtures, and analyst handoff. It records observed evidence and
+candidate linkage separately. It does not infer intent or claim that public-chain activity proves
+human identity or common control.
 
 ## Command
 
 ```bash
 white-radar investigate \
   --chain ethereum \
-  --tx-hash 0xCONFIRMED_TRANSACTION_HASH
+  --tx-hash 0xCONFIRMED_SEED_TRANSACTION_HASH
 ```
 
-The transaction does not need to be in `watchlist.toml`. The selected chain must exist in
-`config.toml`, and its HTTP endpoint environment variable must be populated.
+The seed does not need to exist in `watchlist.toml`. The selected chain must exist in
+`config.toml`, and its HTTP RPC environment variable must be configured.
 
 ```bash
 white-radar investigate \
   --chain ethereum \
-  --tx-hash 0xCONFIRMED_TRANSACTION_HASH \
-  --output evidence/case-name \
-  --overwrite
+  --tx-hash 0xCONFIRMED_SEED_TRANSACTION_HASH \
+  --backward-blocks 2000 \
+  --forward-blocks 4000 \
+  --max-hops 4 \
+  --max-transactions 250 \
+  --max-addresses 128 \
+  --history-source auto \
+  --output evidence/case-name
 ```
 
-Provider-specific controls:
+Use `--overwrite` to replace only White Radar's known files in an existing destination. Use
+`--single-transaction` when expansion is not required.
 
-- `--no-trace` disables `debug_traceTransaction`;
-- `--no-replay` disables the historical `eth_call` at transaction block minus one.
+## Reconstruction semantics
 
-## Reconstruction pipeline
+White Radar labels each reconstructed transaction as one of four phases:
 
-1. Validate the transaction hash format.
-2. Validate `eth_chainId` against the selected chain configuration.
-3. Read `eth_getTransactionByHash` and verify the returned hash.
-4. Read `eth_getTransactionReceipt` and verify the receipt hash.
-5. Require a confirmed block number, read the containing block, and reject inconsistent block
-   numbers or hashes before combining evidence.
-6. Inspect the transaction target for EIP-1967, beacon, UUPS, and direct
-   `implementation()` proxy context.
-7. Request Geth-compatible `callTracer` output through `debug_traceTransaction`.
-8. Flatten the call tree into stable paths such as `0`, `0.1`, and `0.1.2`.
-9. Resolve verified function selectors for a bounded set of call destinations.
-10. Decode standard token transfer logs and native value-bearing call frames.
-11. Classify addresses into evidence-backed roles and query historical runtime code.
-12. Build call and transfer relationships, findings, and timeline records.
-13. Re-run the transaction as a read-only `eth_call` at block minus one when enabled.
-14. Write the case artifacts and SHA-256 manifest.
+- `pre_seed`: confirmed in a block before the seed;
+- `same_block`: linked transaction in the seed block;
+- `seed`: the operator-supplied transaction;
+- `post_seed`: confirmed after the seed.
 
-## Evidence provenance
+These phases describe ledger order, not attack stages or intent. A transaction is included only
+when a configured history source links it to a frontier address and the candidate survives the
+bounded deterministic ranking process. Every included candidate records its hop, relevance score,
+and machine-readable discovery reasons.
 
-| Evidence | Primary source | Evidence reference |
-|---|---|---|
-| Transaction fields | `eth_getTransactionByHash` | `transaction` |
-| Outcome and gas | `eth_getTransactionReceipt` | `receipt` |
-| Log order and topics | Receipt logs | `log:<logIndex>` |
-| Internal execution | `debug_traceTransaction` with `callTracer` | `call:<path>` |
-| Block identity and time | `eth_getBlockByNumber` | block number and hash |
-| Historical runtime code | `eth_getCode` at the transaction block | entity record |
-| Proxy control state | `eth_getStorageAt` and bounded `eth_call` | `proxy_snapshot` |
-| Function signatures | Etherscan API V2 verified ABI | ABI source and SHA-256 |
-| Historical replay | `eth_call` at transaction block minus one | `historical_replay` |
+## Pipeline
 
-Receipt and trace evidence describe the mined transaction. Historical replay is corroborating
-evidence. A replay can differ because a provider lacks archival state, a node applies different
-call defaults, or the original transaction depended on execution context not reproduced by
-`eth_call`.
+### 1. Seed reconstruction
 
-## Call model
+The engine validates chain identity, transaction and receipt hashes, block identity, and
+confirmation. It then reconstructs:
 
-Every trace frame records:
+- transaction, receipt, block, status, fee, and timestamp;
+- nested `CALL`, `STATICCALL`, `DELEGATECALL`, `CALLCODE`, `CREATE`, and `CREATE2` frames when a
+  Geth-compatible `callTracer` is available;
+- native value plus ERC-20, ERC-721, ERC-1155 single, and bounded ERC-1155 batch movement;
+- verified function signatures and bounded static argument values;
+- explicit unverified selector hints when no verified ABI is available;
+- EIP-1967 implementation, admin, beacon, UUPS, and legacy `implementation()` context;
+- historical code classification and protocol-inventory labels;
+- a read-only historical replay at block minus one when enabled.
 
-- stable path and depth;
-- `CALL`, `STATICCALL`, `DELEGATECALL`, `CALLCODE`, `CREATE`, or `CREATE2` type;
-- sender and recipient when supplied by the tracer;
-- native value, gas limit, and gas used;
-- four-byte selector;
-- verified function signature and ABI source when resolved;
-- execution error and bounded revert reason when supplied by the tracer.
+### 2. Frontier construction
 
-The investigator caps the graph at 2,000 call frames. Truncation is explicit in `case.json` and
-`report.md`.
+The first history frontier contains the seed origin and observed non-zero transfer endpoints. If
+the seed contains no transfer endpoint, the top-level destination is used. Token contracts and the
+zero address are not automatically interpreted as controlled entities.
 
-## Asset-flow model
+### 3. Bounded history discovery
 
-### Native value
+The requested block window is:
 
-Native-value edges come from value-bearing call frames. When tracing is unavailable, the
-investigator retains the top-level transaction value as a fallback.
+```text
+[seed block - backward blocks, min(chain head, seed block + forward blocks)]
+```
 
-### ERC-20
+The default `auto` source uses Etherscan API V2 when `ETHERSCAN_API_KEY` is configured and falls
+back to portable Ethereum JSON-RPC when indexed history is unavailable.
 
-An ERC-20 transfer is identified by the standard
-`Transfer(address,address,uint256)` topic with indexed sender and recipient and a 32-byte amount in
-the data field.
+Indexed discovery can combine:
 
-### ERC-721
+- normal account transactions;
+- internal native-value records;
+- ERC-20 transfer records;
+- ERC-721 transfer records;
+- ERC-1155 transfer records.
 
-An ERC-721 transfer uses the same event signature but includes an indexed token identifier as the
-fourth topic. White Radar records amount `1` and the token ID separately.
+The RPC fallback scans full blocks for normal transactions and bounded `eth_getLogs` queries for
+standard transfer topics. It is portable but does not expose all internal value records and is
+more expensive for large block windows.
 
-### ERC-1155
+### 4. Candidate selection
 
-`TransferSingle` records one token ID and amount. `TransferBatch` dynamically encodes arrays of IDs
-and amounts; White Radar validates offsets and lengths and caps a batch at 256 items.
+Candidate scoring is deterministic. It prioritizes internal and token-transfer evidence over a
+normal address touch, adds weight for non-zero value, recognizes inbound evidence before the seed
+and outbound evidence after the seed, and prefers candidates close to the seed block.
 
-Zero-address endpoints are retained so that mint and burn flows remain visible.
+The score is a linkage ranking, not a severity or guilt score. The exact source address, record
+type, direction, transaction hash, and source adapter remain in the case evidence.
 
-The complete transfer inventory is capped at 20,000 records. A cap or malformed standard event is
-recorded as a source limitation rather than silently presented as complete evidence. Native value
-is attributed only to call types that move balances; inherited `DELEGATECALL` value is retained in
-the execution frame but is not counted as a second asset transfer.
+### 5. Related transaction reconstruction
 
-## Entity and relationship model
+Selected candidates run through the same transaction, receipt, block, trace, log, ABI, proxy,
+entity, and transfer pipeline as the seed. Failures do not discard the case: they are counted and
+recorded as warnings.
 
-Entities are unique addresses observed as one or more of:
+New transfer counterparties can enter the next frontier until one of these controls is reached:
 
-- transaction origin or target;
-- call sender or recipient;
-- created contract;
-- asset sender, recipient, operator, or token contract;
-- configured protocol inventory contract.
+- maximum hops;
+- maximum reconstructed transactions;
+- maximum queried addresses;
+- maximum history records per address;
+- requested block window.
 
-Kinds are inferred from historical runtime code and structural evidence. A label is added only when
-the local inventory supplies one; an unlabeled address remains unlabeled.
+Transactions and addresses are deduplicated, which prevents graph cycles from causing unbounded
+reprocessing.
 
-Entity extraction is capped at 1,000 unique addresses. The interactive HTML renders at most 250
-nodes and 1,000 edges; the canonical JSON and tabular exports retain the full bounded inventory.
+### 6. Aggregation and export
 
-Relationships contain their evidence reference:
+All successfully reconstructed transactions are ordered by block, transaction index, and hash.
+White Radar aggregates address roles, transaction membership, calls, transfers, proxy snapshots,
+findings, timelines, and evidence-referenced graph edges. It then writes a deterministic bundle
+and SHA-256 manifest.
 
-- execution edges use their call type;
-- native, ERC-20, ERC-721, and ERC-1155 transfers use typed transfer edges;
-- asset address and raw integer amount remain separate fields.
+## Function and ABI evidence
 
-No relationship is created merely because two addresses appear in the same case.
+Verified ABI metadata is requested through Etherscan API V2 and pinned by a canonical ABI digest.
+When a proxy target does not expose the selector, the effective implementation ABI is checked.
 
-## Timeline semantics
+If verified metadata is unavailable, White Radar can label a bounded catalog of common token,
+proxy, ownership, and role selectors. These labels are explicitly marked
+`built-in selector hint (unverified)` with `candidate` confidence. They never replace verified ABI
+evidence.
 
-The bundle intentionally uses two phases:
+Decoded static arguments include addresses, Booleans, integers, and fixed bytes. Dynamic inputs
+are marked rather than copied without ABI-safe decoding.
 
-1. `execution` is the pre-order call-trace sequence;
-2. `asset_flow` is ordered by receipt `logIndex`, with trace paths for native value.
+## Token metadata and accounting
 
-Standard `callTracer` output does not map every receipt log to its exact internal frame. White Radar
-therefore does not claim a false total ordering between all calls and all emitted logs. Both phases
-preserve their strongest available ordering and evidence references.
+For observed ERC-20 contracts, `name()`, `symbol()`, and `decimals()` are queried with `eth_call` at
+the transaction block. Both raw integer amounts and exact decimal display amounts are retained.
+Integer arithmetic is used throughout; display conversion does not use floating point.
 
-## Proxy-aware ABI resolution
+ERC-721 token identifiers and ERC-1155 identifiers/amounts remain separate. Zero-address
+endpoints are preserved so mint and burn events remain visible.
 
-The root target is checked at the transaction block. White Radar resolves:
+An asset-flow edge proves that a standard event or native-value call was observed in a specific
+transaction. It does not prove beneficial ownership or that two addresses are operated by the
+same person.
+
+## Proxy and contract context
+
+Proxy inspection is pinned to the relevant transaction block and can resolve:
 
 - EIP-1967 implementation and admin slots;
-- EIP-1967 beacon and beacon `implementation()`;
-- direct `implementation()` for legacy or custom proxies;
+- EIP-1967 beacon plus beacon implementation;
+- legacy or custom direct `implementation()` responses;
 - effective implementation runtime code and normalized fingerprint;
 - UUPS `proxiableUUID()` compatibility.
 
-If the proxy ABI does not contain the root selector, the investigator attempts the verified ABI of
-the effective implementation. The reported source is marked as implementation-derived.
+The report lists proxy context per transaction. Unavailable archive state or unsupported RPC
+methods are recorded as evidence gaps.
 
-## Bundle integrity
+## Timeline model
 
-`manifest.json` contains, for every artifact:
+The cross-transaction timeline first orders transactions by confirmed ledger position. Inside each
+transaction it preserves two evidence phases:
 
-- relative path;
-- byte size;
-- SHA-256 digest.
+1. execution-frame pre-order from the call trace;
+2. asset-flow order from receipt `logIndex`, plus trace paths for native value.
 
-To verify an artifact independently:
+Standard `callTracer` output does not map every receipt log to an exact internal frame. White Radar
+therefore does not invent a total order that its sources cannot prove.
 
-```bash
-sha256sum evidence/CASE/case.json
-```
+## Bundle artifacts
 
-Compare the output with the matching manifest entry. The manifest does not hash itself.
+| Artifact | Contents |
+|---|---|
+| `case.json` | Canonical schema, limits, coverage, contexts, complete source cases, entities, edges, timeline, and warnings |
+| `report.md` | Executive summary, scope, candidate phases, chronology, asset ledger, selector inventory, proxy context, entities, and gaps |
+| `transactions.csv` | One row per reconstructed transaction with phase, hop, score, and discovery reasons |
+| `calls.csv` | One row per execution frame with selector, signature, source, confidence, and error evidence |
+| `transfers.csv` | Typed asset flow with token metadata, raw amount, display amount, token ID, and evidence reference |
+| `entities.csv` | Address kind, label, roles, first/last block, and transaction membership |
+| `relationships.csv` | Call and asset-flow edges with source transaction and evidence reference |
+| `timeline.csv` | Cross-transaction ledger order and per-transaction event order |
+| `graph.html` | Self-contained interactive graph with search, filters, zoom/pan, fit, legend, and evidence sidebar |
+| `graph.graphml` | Portable graph for Gephi, Cytoscape, and compatible tools |
+| `manifest.json` | Relative paths, byte sizes, SHA-256 digests, chain, seed, and generation time |
 
-## Interpreting findings
+The HTML graph contains both transaction and address nodes. Edges distinguish transaction
+participation, calls, and asset movement. It is a navigation surface; canonical evidence remains
+in JSON and CSV.
 
-Findings are factual indexes into the evidence, for example:
+## Coverage record
 
-- a reverted transaction or internal frame;
-- delegated execution;
-- contract creation;
-- observed token or native-value flow;
-- resolved proxy execution context.
+Every case records:
 
-They are not vulnerability scores. A `DELEGATECALL`, token transfer, or contract creation is common
-in legitimate EVM execution. Investigation conclusions require protocol-specific context,
-authorization records, expected state transitions, and independent validation.
+- requested start and end block;
+- observed chain head;
+- addresses queried;
+- history records considered;
+- candidate transactions;
+- successful and failed reconstructions;
+- address and transaction limit state;
+- history source adapters;
+- trace availability for each transaction;
+- source-specific warnings.
+
+The boundary classification is `bounded_candidate_chain`. This wording is deliberate: one seed
+cannot prove that no related transaction exists outside the selected window, behind a bridge,
+inside a centralized service, or in unavailable provider data.
+
+## Resource controls
+
+| Resource | Default | Hard maximum |
+|---|---:|---:|
+| Blocks before seed | 256 | 100,000 |
+| Blocks after seed | 512 | 100,000 |
+| Expansion hops | 3 | 8 |
+| Reconstructed transactions | 100 | 2,000 |
+| Frontier addresses | 64 | 2,000 |
+| History records per address | 200 | 5,000 |
+| Call frames per transaction | 2,000 | 2,000 |
+| Calldata retained per call frame | 16,384 bytes | 16,384 bytes |
+| Receipt logs per transaction | 5,000 | 5,000 |
+| Transfers per transaction | 20,000 | 20,000 |
+| ERC-1155 items per batch | 256 | 256 |
+| ABI destinations per transaction | 32 | 32 |
+| Token metadata contracts per run | 64 | 512 |
+
+The interactive report applies display caps for usability. Canonical JSON and CSV retain the full
+bounded reconstruction. If a call input exceeds the calldata cap, its original byte length and
+full-input SHA-256 remain in the case.
 
 ## Provider compatibility
 
-The minimum endpoint needs standard Ethereum JSON-RPC transaction, receipt, block, code, storage,
-and call methods. Exact internal execution requires a provider that exposes Geth-compatible
-`debug_traceTransaction` with `callTracer`.
+Minimum operation requires standard transaction, receipt, block, code, storage, log, and
+`eth_call` methods. Exact internal execution requires Geth-compatible
+`debug_traceTransaction`/`callTracer`. Indexed cross-transaction history benefits from Etherscan V2
+support for the selected chain.
 
-When tracing is unavailable, the case remains usable but cannot prove internal call paths or every
-native-value hop. The report records that limitation without converting it into a failed case.
+When a trace, ABI, archive state, proxy probe, token metadata call, or indexed history action is
+unavailable, the engine preserves available evidence and records the gap. It never silently
+converts missing evidence into a successful conclusion.
 
-## Bounded resource use
+## Interpretation boundary
 
-| Resource | Bound |
-|---|---:|
-| Call frames | 2,000 |
-| Receipt logs | 5,000 |
-| Asset transfers | 20,000 |
-| ERC-1155 items per batch | 256 |
-| Entities | 1,000 |
-| Historical code lookups | 128 |
-| ABI destinations | 32 |
-| HTML graph nodes / edges | 250 / 1,000 |
-| ERC-1155 batch items | 256 |
-| Interactive graph nodes | 250 |
-| Interactive graph edges | 1,000 |
+White Radar can reconstruct a strong, auditable candidate chain within its configured evidence
+boundary. It cannot guarantee a literal first-to-last narrative when relevant activity is
+off-chain, cross-chain without a supported bridge adapter, hidden behind a service's internal
+ledger, outside the requested window, or unavailable from the configured providers.
 
-The canonical JSON and CSV artifacts preserve the full bounded case even when the interactive graph
-uses a smaller rendering cap.
-
-## Current boundary
-
-One seed transaction reconstructs all calls, standard transfers, and relationships inside that
-transaction. It does not yet enumerate every subsequent transaction made by every involved address.
-Bounded forward and backward transaction expansion, bridge continuation, entity-label adapters,
-and cross-transaction fund-flow accounting are separate roadmap items.
+Analyst conclusions should cite transaction hashes, blocks, calls, logs, source adapters, and
+bundle hashes. Candidate relevance, address co-occurrence, or transfer direction alone must not be
+presented as proof of identity, ownership, or intent.

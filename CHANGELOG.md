@@ -4,6 +4,21 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- expanded `white-radar investigate` from a one-transaction bundle into bounded backward/forward
+  reconstruction from any confirmed seed transaction;
+- added indexed Etherscan V2 normal, internal, ERC-20, ERC-721, and ERC-1155 history adapters with
+  portable bounded JSON-RPC block/log fallback;
+- added deterministic candidate ranking, multi-hop frontier expansion, cycle deduplication,
+  discovery reasons, coverage counters, and source-specific warnings;
+- added cross-transaction phases, chronology, entity aggregation, call/asset edges, and per-asset
+  ledgers;
+- added block-pinned token name, symbol, decimals, raw amounts, and exact display amounts;
+- added explicitly unverified built-in selector hints when verified ABI evidence is unavailable;
+- added per-call bounded calldata, decoded arguments, original byte length, SHA-256, truncation
+  state, and historical runtime-code fingerprints for contract entities;
+- added `transactions.csv`, cross-transaction JSON schema, richer Markdown reporting, searchable
+  interactive address/transaction graphs, and GraphML provenance;
+- added Monad mainnet configuration templates;
 - repositioned White Radar around transaction-centric incident investigation and a quiet protocol
   guard;
 - added `white-radar investigate` for confirmed transactions without a watchlist requirement;

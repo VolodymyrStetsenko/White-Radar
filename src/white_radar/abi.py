@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 MAX_ABI_BYTES = 2_000_000
 MAX_ABI_ENTRIES = 2_000
+BUILTIN_SELECTOR_SOURCE = "built-in selector hint (unverified)"
 ROTATION_OFFSETS = (
     (0, 36, 3, 41, 18),
     (1, 44, 10, 45, 2),
@@ -141,6 +142,59 @@ def build_selector_catalog(abi: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
+def _function(name: str, *inputs: tuple[str, str]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": name,
+        "inputs": [{"name": input_name, "type": type_name} for input_name, type_name in inputs],
+    }
+
+
+BUILTIN_FUNCTIONS = (
+    _function("transfer", ("to", "address"), ("amount", "uint256")),
+    _function("approve", ("spender", "address"), ("amount", "uint256")),
+    _function(
+        "transferFrom",
+        ("from", "address"),
+        ("to", "address"),
+        ("valueOrTokenId", "uint256"),
+    ),
+    _function("balanceOf", ("account", "address")),
+    _function("allowance", ("owner", "address"), ("spender", "address")),
+    _function("totalSupply"),
+    _function("mint", ("to", "address"), ("amount", "uint256")),
+    _function("burn", ("amount", "uint256")),
+    _function("burnFrom", ("account", "address"), ("amount", "uint256")),
+    _function(
+        "safeTransferFrom",
+        ("from", "address"),
+        ("to", "address"),
+        ("tokenId", "uint256"),
+    ),
+    _function("setApprovalForAll", ("operator", "address"), ("approved", "bool")),
+    _function(
+        "safeTransferFrom",
+        ("from", "address"),
+        ("to", "address"),
+        ("id", "uint256"),
+        ("amount", "uint256"),
+        ("data", "bytes"),
+    ),
+    _function("upgradeTo", ("newImplementation", "address")),
+    _function("upgradeToAndCall", ("newImplementation", "address"), ("data", "bytes")),
+    _function("implementation"),
+    _function("owner"),
+    _function("grantRole", ("role", "bytes32"), ("account", "address")),
+    _function("revokeRole", ("role", "bytes32"), ("account", "address")),
+)
+BUILTIN_SELECTORS = build_selector_catalog(list(BUILTIN_FUNCTIONS))
+BUILTIN_ITEMS = {
+    selector_for_signature(signature): item
+    for item in BUILTIN_FUNCTIONS
+    if (signature := function_signature(item)) is not None
+}
+
+
 def _decode_word(type_name: str, word: bytes) -> object:
     if type_name == "address":
         return "0x" + word[-20:].hex()
@@ -191,6 +245,7 @@ class DecodedCall:
     arguments: dict[str, object]
     source: str | None
     abi_sha256: str | None
+    confidence: str | None = None
 
 
 class AbiResolver:
@@ -271,7 +326,9 @@ class AbiResolver:
     ) -> DecodedCall:
         selector = calldata[:10].lower() if len(calldata) >= 10 else "0x"
         selectors, source, digest = self.catalog(chain_id, address)
-        signature = selectors.get(selector) or fallback_signature
+        verified_signature = selectors.get(selector)
+        builtin_signature = BUILTIN_SELECTORS.get(selector)
+        signature = verified_signature or fallback_signature or builtin_signature
         arguments: dict[str, object] = {}
         in_memory = self._memory.get((chain_id, address.lower()))
         if signature and in_memory and " | " not in signature:
@@ -281,4 +338,17 @@ class AbiResolver:
             )
             if item:
                 arguments = decode_static_arguments(item, calldata)
-        return DecodedCall(selector, signature, arguments, source, digest)
+        if not arguments and builtin_signature and signature == builtin_signature:
+            item = BUILTIN_ITEMS.get(selector)
+            if item:
+                arguments = decode_static_arguments(item, calldata)
+        if verified_signature:
+            confidence = "verified"
+        elif fallback_signature:
+            confidence = "provided_hint"
+        elif builtin_signature:
+            confidence = "candidate"
+            source = BUILTIN_SELECTOR_SOURCE
+        else:
+            confidence = None
+        return DecodedCall(selector, signature, arguments, source, digest, confidence)

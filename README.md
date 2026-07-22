@@ -1,8 +1,10 @@
 # White Radar
 
-White Radar is a transaction-centric incident investigator for EVM networks. Given one confirmed
-transaction hash, it reconstructs execution, asset movement, contract relationships, proxy
-context, and evidence provenance into a portable case bundle.
+White Radar is a transaction-centric incident reconstruction engine for EVM networks. Given one
+confirmed seed transaction from any observed point in a suspected incident, it searches a bounded
+window before and after that seed, reconstructs related transactions, and combines execution,
+asset movement, contract relationships, proxy context, and evidence provenance into one portable
+case bundle.
 
 The primary product is investigation, not universal attack prediction. A secondary quiet guard can
 observe explicitly inventoried protocol contracts, but routine mempool activity is aggregated as
@@ -19,33 +21,39 @@ white-radar investigate \
   --tx-hash 0xCONFIRMED_TRANSACTION_HASH
 ```
 
-No watchlist entry is required. The command:
+No watchlist entry is required. By default, the seed is expanded backward and forward. The
+command:
 
-1. validates the configured RPC chain identity;
-2. fetches the transaction, receipt, and containing block, then rejects inconsistent hash or
-   block evidence;
-3. requests an exact mined `callTracer` trace when the provider supports it;
-4. flattens nested `CALL`, `DELEGATECALL`, `STATICCALL`, `CREATE`, and `CREATE2` frames;
-5. reconstructs native-value, ERC-20, ERC-721, and ERC-1155 transfers;
-6. resolves verified function signatures and proxy implementation context when available;
-7. performs a read-only historical replay at transaction block minus one;
-8. builds entities, evidence-backed relationships, findings, and a two-phase timeline;
-9. writes a hash-manifested case bundle.
+1. reconstructs the seed transaction from its transaction, receipt, block, trace, logs, verified
+   ABI, proxy state, and historical replay evidence;
+2. derives an initial frontier from the origin and observed transfer endpoints;
+3. queries bounded normal, internal, ERC-20, ERC-721, and ERC-1155 history through Etherscan V2
+   when configured, with a portable JSON-RPC block/log fallback;
+4. ranks related transaction candidates by observed direction, transfer type, value, and distance
+   from the seed;
+5. reconstructs each selected transaction with the same per-transaction evidence pipeline;
+6. expands linked addresses for a bounded number of hops while deduplicating addresses,
+   transactions, and cycles;
+7. resolves token name, symbol, and decimals at each transaction block when the contract exposes
+   them;
+8. produces a chronological candidate incident chain with explicit discovery reasons, source
+   provenance, coverage limits, warnings, and integrity hashes.
 
-The default destination is `evidence/<chain>-<transaction-prefix>/`.
+The default destination is `evidence/<chain>-<transaction-prefix>-reconstruction/`.
 
 ## Case bundle
 
 | Artifact | Purpose |
 |---|---|
-| `case.json` | Canonical machine-readable transaction, receipt, calls, transfers, entities, findings, and provenance |
-| `report.md` | Human-readable investigation summary and evidence index |
-| `calls.csv` | Full bounded execution-frame inventory |
-| `transfers.csv` | Reconstructed native and standard token movement |
-| `entities.csv` | Addresses, inferred kinds, labels, and observed roles |
-| `relationships.csv` | Call and transfer edges with evidence references |
-| `timeline.csv` | Execution-order calls and receipt-log asset-flow order |
-| `graph.html` | Self-contained interactive relationship graph |
+| `case.json` | Canonical machine-readable reconstruction, source cases, limits, coverage, warnings, and provenance |
+| `report.md` | Human-readable executive summary, chronology, asset ledger, selector inventory, proxy context, entities, and evidence gaps |
+| `transactions.csv` | Seed, pre-seed, same-block, and post-seed transaction inventory with inclusion reasons |
+| `calls.csv` | Bounded execution-frame inventory across every reconstructed transaction |
+| `transfers.csv` | Native and standard token movement with raw and normalized amounts |
+| `entities.csv` | Addresses, inferred kinds, labels, observed roles, and transaction membership |
+| `relationships.csv` | Cross-transaction call and transfer edges with evidence references |
+| `timeline.csv` | Block/transaction chronology plus execution and asset-flow order |
+| `graph.html` | Self-contained interactive address/transaction graph with search, filters, zoom, and evidence details |
 | `graph.graphml` | Portable graph for Gephi, Cytoscape, and compatible tools |
 | `manifest.json` | SHA-256 and byte size for every bundle artifact |
 
@@ -81,7 +89,7 @@ Requirements:
 - Python 3.11 or newer;
 - an HTTP JSON-RPC endpoint for each configured network;
 - optional trace-capable RPC access for exact internal calls;
-- optional Etherscan API V2 access for verified interfaces;
+- optional Etherscan API V2 access for verified interfaces and indexed address history;
 - a WebSocket RPC only when the quiet pending guard is enabled;
 - optional Telegram credentials for promoted guard cases and digests.
 
@@ -134,7 +142,17 @@ Useful controls:
 
 - `--no-trace` skips `debug_traceTransaction` for providers without trace access;
 - `--no-replay` skips the historical `eth_call` at block minus one;
+- `--backward-blocks` and `--forward-blocks` set the search window around the seed;
+- `--max-hops`, `--max-transactions`, and `--max-addresses` bound graph expansion;
+- `--history-source auto|etherscan|rpc` chooses indexed discovery, portable RPC discovery, or
+  automatic fallback;
+- `--single-transaction` disables expansion and preserves the original one-transaction workflow;
 - `--overwrite` replaces only White Radar's known files in an existing case directory.
+
+The RPC history fallback scans only the requested bounded window. Large windows are intentionally
+expensive and should use an indexed history source. Every report records the actual source,
+requested window, number of addresses queried, records considered, candidates, failures, and
+whether a configured cap was reached.
 
 The original mined trace is primary execution evidence. Historical replay is corroborating evidence
 and may differ when a provider lacks archival state or when `eth_call` semantics cannot reproduce a
@@ -144,12 +162,12 @@ mined transaction exactly.
 
 ```mermaid
 flowchart TD
-    Input["Confirmed transaction hash"] --> RPC["Read-only RPC boundary"]
-    RPC --> Reconstruct["Receipt / trace / logs / historical state"]
-    Explorer["Verified ABI metadata"] --> Reconstruct
-    Reconstruct --> Case["Calls / transfers / entities / findings"]
+    Input["Seed transaction hash"] --> Seed["Seed execution reconstruction"]
+    Seed --> Discover["Bounded history discovery"]
+    Index["Indexed history / RPC fallback"] --> Discover
+    Discover --> Related["Related transaction reconstruction"]
+    Related --> Case["Chronology / calls / flows / entities / provenance"]
     Case --> Bundle["JSON / CSV / Markdown / HTML / GraphML / manifest"]
-    Guard["Quiet protocol guard"] -->|"promoted signals only"| Case
 ```
 
 The investigator and quiet guard share RPC validation, ABI resolution, proxy inspection, policy,
@@ -158,11 +176,22 @@ reconstructs a known transaction, while the guard observes only configured proto
 
 ## Supported evidence
 
+### Cross-transaction reconstruction
+
+- bounded pre-seed, same-block, seed, and post-seed transaction phases;
+- normal transactions, internal value records, and standard token-transfer history;
+- deterministic candidate scoring and a recorded reason for every included transaction;
+- bounded multi-hop address expansion with cycle and transaction deduplication;
+- transaction/address graph edges tied to a source transaction and evidence reference;
+- explicit coverage classification and warnings rather than an unsupported claim of completeness.
+
 ### Execution
 
 - transaction and receipt status;
 - block number, hash, timestamp, and transaction fee;
 - nested call path, depth, type, sender, recipient, value, gas, selector, and revert evidence;
+- bounded calldata, decoded arguments, original byte length, SHA-256, and truncation state per
+  traced call;
 - contract creation and delegated execution observations;
 - exact trace availability and truncation state.
 
@@ -182,17 +211,21 @@ reconstructs a known transaction, while the guard observes only configured proto
 - beacon implementation resolution;
 - legacy proxy `implementation()` resolution;
 - implementation runtime fingerprint and UUPS probe;
+- historical runtime byte size and SHA-256 for observed contract entities;
 - optional protocol labels from the local inventory.
 
-## Remaining scope
+## Evidence boundary
 
-The current investigator reconstructs one confirmed transaction completely within the evidence
-available from its RPC, receipt logs, and verified metadata. It does not yet discover every later
-transaction made by every resulting address. Bounded multi-transaction follow-funds, bridge-aware
-continuation, entity labeling, and public-incident regression fixtures remain engineering work and
-are tracked in [ROADMAP.md](ROADMAP.md).
+White Radar now discovers and reconstructs a bounded cross-transaction candidate chain. A public
+ledger does not, by itself, prove human identity, intent, common control, or that the earliest and
+latest discovered transactions are the true incident boundaries. Mixer semantics, exchange
+internal ledgers, privacy systems, off-chain actions, unsupported bridges, unavailable archive
+state, provider pruning, and service-address fan-out can create unresolved gaps.
 
-This boundary is explicit so that the output does not overstate what one transaction proves.
+The report therefore distinguishes observed evidence from candidate linkage and records every
+limit and source gap. Bridge-aware cross-chain continuation, service/router classification,
+state-diff extraction, richer event decoding, checkpoints, and public-incident regression fixtures
+remain tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Additional commands
 

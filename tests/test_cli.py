@@ -47,6 +47,11 @@ class CliTests(unittest.TestCase):
         )
         self.assertTrue(investigation.trace)
         self.assertTrue(investigation.replay)
+        self.assertFalse(investigation.single_transaction)
+        self.assertEqual(investigation.backward_blocks, 256)
+        self.assertEqual(investigation.forward_blocks, 512)
+        self.assertEqual(investigation.max_hops, 3)
+        self.assertEqual(investigation.history_source, "auto")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"

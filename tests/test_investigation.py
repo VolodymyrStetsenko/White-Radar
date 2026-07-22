@@ -153,6 +153,18 @@ class InvestigationTests(unittest.TestCase):
         self.assertIsNone(delegate_edge.amount)
         self.assertEqual(case.transfers[-1].amount, "1000")
         self.assertEqual(case.root_call.signature, "execute(uint256)")  # type: ignore[union-attr]
+        self.assertEqual(case.calls[0].decoded_arguments, {"amount": 7})
+        self.assertEqual(case.calls[0].calldata_bytes, 36)
+        self.assertEqual(
+            case.calls[0].calldata_sha256,
+            hashlib.sha256(bytes.fromhex(case.calls[0].calldata[2:])).hexdigest(),
+        )
+        target_entity = next(item for item in case.entities if item.address == TARGET)
+        self.assertEqual(target_entity.code_bytes, 2)
+        self.assertEqual(
+            target_entity.runtime_code_sha256,
+            hashlib.sha256(bytes.fromhex("6000")).hexdigest(),
+        )
         self.assertTrue(case.trace_available)
         self.assertEqual(case.historical_replay.block_number, 99)  # type: ignore[union-attr]
         self.assertIn("delegated_execution", {item.code for item in case.findings})

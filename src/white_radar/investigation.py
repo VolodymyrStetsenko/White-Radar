@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import hashlib
 import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,7 @@ MAX_ENTITIES = 1_000
 MAX_CODE_LOOKUPS = 128
 MAX_ABI_DESTINATIONS = 32
 MAX_ERC1155_BATCH_ITEMS = 256
+MAX_CALLDATA_BYTES = 16_384
 VALUE_TRANSFER_CALL_TYPES = frozenset({"CALL", "CREATE", "CREATE2", "SELFDESTRUCT"})
 
 TRANSFER_TOPIC = "0x" + keccak_256(b"Transfer(address,address,uint256)").hex()
@@ -139,6 +141,12 @@ class CallFrame:
     abi_source: str | None
     error: str | None
     revert_reason: str | None
+    decode_confidence: str | None = None
+    decoded_arguments: dict[str, object] = dataclasses.field(default_factory=dict)
+    calldata: str = "0x"
+    calldata_bytes: int = 0
+    calldata_sha256: str | None = None
+    calldata_truncated: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -156,6 +164,10 @@ class AssetTransfer:
     operator: str | None
     source: str
     evidence_ref: str
+    asset_name: str | None = None
+    asset_symbol: str | None = None
+    asset_decimals: int | None = None
+    amount_display: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -168,6 +180,8 @@ class Entity:
     label: str | None
     roles: tuple[str, ...]
     code_observed: bool | None
+    code_bytes: int | None = None
+    runtime_code_sha256: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -182,6 +196,9 @@ class Relationship:
     evidence_ref: str
     asset_address: str | None = None
     amount: str | None = None
+    asset_type: str | None = None
+    asset_symbol: str | None = None
+    amount_display: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -268,6 +285,17 @@ def _flatten_trace(
         sender = _address(raw_frame.get("from"))
         recipient = _address(raw_frame.get("to"))
         calldata = str(raw_frame.get("input") or "0x")
+        raw_calldata = _hex_data(calldata)
+        calldata_bytes = len(raw_calldata) if raw_calldata is not None else 0
+        calldata_sha256 = (
+            hashlib.sha256(raw_calldata).hexdigest() if raw_calldata is not None else None
+        )
+        calldata_truncated = calldata_bytes > MAX_CALLDATA_BYTES
+        bounded_calldata = (
+            "0x" + raw_calldata[:MAX_CALLDATA_BYTES].hex()
+            if raw_calldata is not None
+            else "0x"
+        )
         decoded: DecodedCall | None = None
         if (
             resolver
@@ -307,6 +335,12 @@ def _flatten_trace(
                 abi_source=decoded.source if decoded else None,
                 error=error,
                 revert_reason=revert_reason,
+                decode_confidence=decoded.confidence if decoded else None,
+                decoded_arguments=dict(decoded.arguments) if decoded else {},
+                calldata=bounded_calldata,
+                calldata_bytes=calldata_bytes,
+                calldata_sha256=calldata_sha256,
+                calldata_truncated=calldata_truncated,
             )
         )
         children = raw_frame.get("calls") or []
@@ -538,15 +572,23 @@ def _build_entities(
     for address in sorted(roles):
         kind = forced_kinds.get(address)
         code_observed: bool | None = None
+        code_bytes: int | None = None
+        runtime_code_sha256: str | None = None
         if address == ZERO_ADDRESS:
             kind = "system"
             code_observed = False
+            code_bytes = 0
         elif kind != "account" and code_lookups < MAX_CODE_LOOKUPS:
             try:
                 code_lookups += 1
                 code = rpc.code(address, block_ref)
                 normalized_code = code.removeprefix("0x").strip("0")
                 code_observed = code not in {"0x", "0x0", ""} and bool(normalized_code)
+                raw_code = _hex_data(code)
+                if raw_code is not None:
+                    code_bytes = len(raw_code)
+                    if raw_code:
+                        runtime_code_sha256 = hashlib.sha256(raw_code).hexdigest()
                 if kind != "contract":
                     kind = "contract" if code_observed else "account"
             except (RpcError, AttributeError):
@@ -558,6 +600,8 @@ def _build_entities(
                 label=_known_label(watchlist, chain_id, address),
                 roles=tuple(sorted(roles[address])),
                 code_observed=code_observed,
+                code_bytes=code_bytes,
+                runtime_code_sha256=runtime_code_sha256,
             )
         )
     return tuple(entities), truncated
@@ -592,6 +636,9 @@ def _build_relationships(
                 evidence_ref=transfer.evidence_ref,
                 asset_address=transfer.asset_address,
                 amount=transfer.amount,
+                asset_type=transfer.asset_type,
+                asset_symbol=transfer.asset_symbol,
+                amount_display=transfer.amount_display,
             )
         )
     return tuple(relationships)
@@ -882,6 +929,13 @@ def investigate_transaction(
     )
     if trace_truncated:
         warnings.append(f"The call graph was capped at {MAX_CALL_FRAMES} frames.")
+    truncated_calldata = sum(frame.calldata_truncated for frame in calls)
+    if truncated_calldata:
+        warnings.append(
+            f"Calldata was display-capped at {MAX_CALLDATA_BYTES} bytes in "
+            f"{truncated_calldata} call frame(s); full byte lengths and SHA-256 digests "
+            "are retained."
+        )
 
     root_calldata = str(transaction.get("input") or "0x")
     root_call: DecodedCall | None = None

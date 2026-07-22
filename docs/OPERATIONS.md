@@ -6,7 +6,7 @@ A complete single-host deployment separates one on-demand workflow and five serv
 
 | Workload | Process | Cadence |
 |---|---|---|
-| Transaction investigation | `white-radar investigate` | On demand per confirmed transaction |
+| Transaction reconstruction | `white-radar investigate` | On demand per confirmed seed transaction |
 | Confirmed ingestion | `white-radar daemon` | Continuous |
 | Quiet protocol guard | `white-radar watch-pending --chain NAME` | Continuous per selected chain |
 | Profile refresh | `white-radar refresh-profiles` | Scheduled |
@@ -43,13 +43,22 @@ white-radar status
 white-radar preview-alert
 ```
 
-Create one investigation bundle independently of the inventory:
+Create one bounded cross-transaction bundle independently of the inventory:
 
 ```bash
 white-radar investigate \
   --chain ethereum \
-  --tx-hash 0xCONFIRMED_TRANSACTION_HASH
+  --tx-hash 0xCONFIRMED_TRANSACTION_HASH \
+  --backward-blocks 256 \
+  --forward-blocks 512 \
+  --max-hops 3 \
+  --max-transactions 100 \
+  --history-source auto
 ```
+
+For large search windows, configure `ETHERSCAN_API_KEY` so indexed address history is used. The
+portable RPC fallback scans bounded blocks and standard transfer logs and can consume substantial
+provider capacity. Use `--single-transaction` for an isolated execution bundle.
 
 Run continuous workloads in separate terminals:
 

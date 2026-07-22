@@ -81,6 +81,22 @@ class AbiTests(unittest.TestCase):
             assert cached is not None
             self.assertEqual(cached["selectors"]["0xa9059cbb"], decoded.signature)
 
+    def test_resolver_marks_builtin_selector_matches_as_unverified_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RadarStore(Path(directory) / "radar.sqlite3")
+            store.initialize()
+            resolver = AbiResolver(store, timeout=1, retries=1)
+            contract = "0x" + "22" * 20
+            recipient = "11" * 20
+            calldata = "0x40c10f19" + "0" * 24 + recipient + f"{25:064x}"
+            with patch.dict(os.environ, {}, clear=True):
+                decoded = resolver.resolve(1, contract, calldata)
+            self.assertEqual(decoded.signature, "mint(address,uint256)")
+            self.assertEqual(decoded.arguments["to"], "0x" + recipient)
+            self.assertEqual(decoded.arguments["amount"], 25)
+            self.assertEqual(decoded.confidence, "candidate")
+            self.assertIn("unverified", decoded.source or "")
+
 
 if __name__ == "__main__":
     unittest.main()

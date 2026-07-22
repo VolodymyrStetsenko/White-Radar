@@ -128,13 +128,15 @@ def render_investigation_report(case: InvestigationCase) -> str:
             ]
         )
         for transfer in case.transfers[:100]:
+            asset = transfer.asset_symbol or transfer.asset_address or "native"
+            amount = transfer.amount_display or transfer.amount
             lines.append(
                 "| {} | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |".format(
                     transfer.asset_type,
-                    _plain(transfer.asset_address or "native"),
+                    _plain(asset),
                     transfer.sender,
                     transfer.recipient,
-                    transfer.amount,
+                    amount,
                     _plain(transfer.token_id or ""),
                     transfer.evidence_ref,
                 )
@@ -379,19 +381,37 @@ def write_case_bundle(
                 "selector",
                 "function_signature",
                 "abi_source",
+                "decode_confidence",
+                "decoded_arguments",
+                "calldata",
+                "calldata_bytes",
+                "calldata_sha256",
+                "calldata_truncated",
                 "error",
                 "revert_reason",
             ),
-            [item.to_dict() for item in case.calls],
+            [
+                {
+                    **item.to_dict(),
+                    "decoded_arguments": json.dumps(
+                        item.decoded_arguments, sort_keys=True, separators=(",", ":")
+                    ),
+                }
+                for item in case.calls
+            ],
         ),
         "transfers.csv": _csv_text(
             (
                 "transfer_id",
                 "asset_type",
                 "asset_address",
+                "asset_name",
+                "asset_symbol",
+                "asset_decimals",
                 "sender",
                 "recipient",
                 "amount",
+                "amount_display",
                 "token_id",
                 "operator",
                 "source",
@@ -400,7 +420,15 @@ def write_case_bundle(
             [item.to_dict() for item in case.transfers],
         ),
         "entities.csv": _csv_text(
-            ("address", "kind", "label", "roles", "code_observed"),
+            (
+                "address",
+                "kind",
+                "label",
+                "roles",
+                "code_observed",
+                "code_bytes",
+                "runtime_code_sha256",
+            ),
             [
                 {
                     **item.to_dict(),
@@ -418,6 +446,9 @@ def write_case_bundle(
                 "evidence_ref",
                 "asset_address",
                 "amount",
+                "asset_type",
+                "asset_symbol",
+                "amount_display",
             ),
             [item.to_dict() for item in case.relationships],
         ),

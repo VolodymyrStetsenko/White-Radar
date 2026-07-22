@@ -29,11 +29,16 @@ categories and the incident-management objectives in
 ### Transaction reconstruction
 
 - confirmed transaction, receipt, containing block, status, gas, and fee evidence;
+- bounded pre-seed, same-block, seed, and post-seed transaction discovery;
+- indexed normal/internal/token history with portable block/log fallback;
+- deterministic discovery reasons, source provenance, and coverage counters;
 - bounded exact mined call tree when `callTracer` is available;
 - native, ERC-20, ERC-721, and ERC-1155 asset movement;
+- block-pinned ERC-20 metadata, raw amounts, and exact display amounts;
 - entity roles and evidence-backed call/transfer relationships;
 - proxy implementation context and verified selector identity;
-- portable case bundles with evidence references and integrity hashes.
+- searchable cross-transaction graphs and portable case bundles with evidence references and
+  integrity hashes.
 
 ### Control-plane monitoring
 
@@ -95,7 +100,10 @@ categories and the incident-management objectives in
 - Off-chain compromise, social engineering, leaked signers, and governance operations require
   external telemetry.
 - Cross-chain messages require source/destination correlation that is not yet implemented.
-- One seed transaction does not yet enumerate later transactions made by every involved address.
+- Bounded expansion cannot prove that no relevant transaction exists outside its block, hop,
+  address, transaction, or provider-data limits.
+- Centralized-service internal ledgers, unsupported bridges, privacy systems, and unavailable
+  archive/index data can interrupt an on-chain candidate chain.
 - Contract-level signals cannot identify the real-world controller of an address.
 
 Coverage should therefore be evaluated per protocol as a set of configured data sources,

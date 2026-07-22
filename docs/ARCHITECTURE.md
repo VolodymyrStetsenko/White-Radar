@@ -11,15 +11,21 @@ White Radar is built around eight engineering properties:
 5. every priority score contains machine-readable findings and human-readable reasons;
 6. delivery failures are isolated from evidence ingestion;
 7. runtime health and evidence provenance are queryable.
-8. transaction investigation remains useful when optional trace or explorer enrichment is absent.
+8. transaction reconstruction remains useful when optional trace, index, or explorer enrichment is
+   absent;
+9. cross-transaction expansion is deterministic, bounded, provenance-preserving, and resumable in
+   design even when a source is incomplete.
 
 ## Component map
 
 | Component | Responsibility | Principal input |
 |---|---|---|
 | `JsonRpcClient` | Read-method enforcement, JSON-RPC calls, HTTP failover | Untrusted provider responses |
-| Incident Investigator | One-transaction execution, asset-flow, entity, finding, and timeline reconstruction | Confirmed transaction hash |
-| Case bundle writer | Canonical JSON, CSV tables, Markdown, HTML/GraphML graph, integrity manifest | Normalized investigation case |
+| Incident Investigator | Per-transaction execution, asset-flow, entity, finding, proxy, and timeline reconstruction | Confirmed transaction hash |
+| History adapters | Bounded normal, internal, ERC-20, ERC-721, and ERC-1155 address history | Indexed API or JSON-RPC window |
+| Reconstruction engine | Candidate ranking, multi-hop expansion, transaction deduplication, chronology, and coverage | Seed case plus history evidence |
+| Token metadata resolver | Block-pinned name, symbol, decimals, and exact display amount | Observed ERC-20 contracts |
+| Case bundle writer | Canonical JSON, CSV tables, Markdown, interactive HTML/GraphML graph, integrity manifest | Normalized reconstruction |
 | `ChainScanner` | Confirmed ranges, deployments, control events, invariant cycles | Confirmation-safe chain state |
 | `watch_pending_transactions` | Quiet inventory guard, telemetry aggregation, and evidence promotion | Partial provider mempool |
 | `ContractEnricher` | Sourcify, Etherscan V2, and EIP-1967 metadata | Explorer and storage reads |
@@ -38,12 +44,12 @@ White Radar is built around eight engineering properties:
 
 ```mermaid
 flowchart TD
-    Seed["Confirmed transaction hash"] --> Boundary["Read-only RPC boundary"]
-    Explorer["Sourcify / Etherscan"] --> Analyze["Receipt / trace / ABI / proxy / asset flow"]
-    Boundary --> Analyze
-    Guard["Quiet protocol guard"] -->|"promoted evidence"| Analyze
-    Analyze --> Evidence["Case model and evidence store"]
-    Evidence --> Delivery["Case bundle / Telegram / health"]
+    Seed["Seed transaction hash"] --> PerTx["Per-transaction reconstruction"]
+    History["Indexed history / RPC fallback"] --> Expand["Bounded candidate expansion"]
+    PerTx --> Expand
+    Expand --> Related["Related transaction reconstruction"]
+    Related --> Aggregate["Chronology / flows / entities / provenance"]
+    Aggregate --> Bundle["Case bundle and integrity manifest"]
 ```
 
 ## Read-only RPC boundary
@@ -63,7 +69,7 @@ Each chain can define a primary endpoint and ordered fallbacks. The active endpo
 a transport failure, malformed response, or method-unavailable response. An RPC execution error is
 returned directly because it may be part of the evidence.
 
-## Transaction investigation pipeline
+## Transaction reconstruction pipeline
 
 1. Validate a confirmed transaction hash and the configured RPC chain identity.
 2. Read and cross-check the transaction and receipt hashes.
@@ -75,10 +81,33 @@ returned directly because it may be part of the evidence.
 8. Classify entities from historical runtime code and observed roles.
 9. Build evidence-referenced relationships, findings, and separate execution/asset timelines.
 10. Optionally corroborate the result with `eth_call` at transaction block minus one.
+
+This pipeline is reusable for the seed and every selected related transaction.
+
+## Cross-transaction expansion pipeline
+
+1. Derive a frontier from the seed origin and non-zero asset-transfer endpoints.
+2. Compute an explicit backward/forward block window bounded by the observed chain head.
+3. Query normal, internal, ERC-20, ERC-721, and ERC-1155 history through an indexed adapter.
+4. Fall back to bounded full-block and standard transfer-log scanning when indexed history is
+   unavailable.
+5. Normalize history records with transaction, block, endpoints, asset, amount, source, and type.
+6. Score candidates deterministically by evidence type, value, direction relative to the seed,
+   and block distance.
+7. Reconstruct selected candidates with the per-transaction pipeline.
+8. Add evidence-linked counterparties to the next frontier within configured hop and address
+   limits.
+9. Deduplicate addresses, transactions, and graph cycles.
+10. Aggregate transaction phases, call/asset edges, token metadata, entities, proxy snapshots,
+    timeline entries, warnings, and coverage counters.
 11. Write canonical JSON, CSV tables, Markdown, interactive HTML, GraphML, and a SHA-256 manifest.
 
-Trace, explorer, and replay data are optional enrichments. Transaction and receipt evidence remains
-available when one of those sources is unavailable. See [Transaction incident
+The expansion result is classified as a bounded candidate chain. It cannot claim that a source
+adapter proves the true first or final incident transaction, identity, ownership, or intent.
+
+Trace, history index, explorer, token metadata, and replay data are optional enrichments.
+Transaction and receipt evidence remains available when one of those sources is unavailable. See
+[Transaction incident
 investigation](INVESTIGATION.md).
 
 ## Confirmed-block pipeline
