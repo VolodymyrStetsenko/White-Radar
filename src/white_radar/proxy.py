@@ -7,7 +7,8 @@ from white_radar.enrichment import EIP1967_SLOTS, storage_word_to_address
 from white_radar.fingerprint import fingerprint_bytecode
 from white_radar.rpc import JsonRpcClient, RpcError
 
-BEACON_IMPLEMENTATION_SELECTOR = "0x5c60da1b"
+IMPLEMENTATION_SELECTOR = "0x5c60da1b"
+BEACON_IMPLEMENTATION_SELECTOR = IMPLEMENTATION_SELECTOR
 PROXIABLE_UUID_SELECTOR = "0x52d1902d"
 
 
@@ -72,6 +73,19 @@ def inspect_proxy(
         name: storage_word_to_address(rpc.storage_at(address, slot, block_ref))
         for name, slot in EIP1967_SLOTS.items()
     }
+    direct_implementation: str | None = None
+    if not slots["implementation"] and not slots["beacon"]:
+        try:
+            candidate = _returned_address(
+                rpc.eth_call(
+                    {"to": address, "data": IMPLEMENTATION_SELECTOR},
+                    block_ref,
+                )
+            )
+            if candidate and fingerprint_bytecode(rpc.code(candidate, block_ref)).bytecode_size:
+                direct_implementation = candidate
+        except RpcError:
+            direct_implementation = None
     beacon_implementation: str | None = None
     if slots["beacon"]:
         try:
@@ -83,7 +97,7 @@ def inspect_proxy(
             )
         except RpcError:
             beacon_implementation = None
-    effective = slots["implementation"] or beacon_implementation
+    effective = slots["implementation"] or beacon_implementation or direct_implementation
     code_hash: str | None = None
     code_size = 0
     uups_compatible: bool | None = None
@@ -129,7 +143,7 @@ def inspect_proxy(
         address=address.lower(),
         block_number=selected_block,
         block_hash=block_hash,
-        implementation=slots["implementation"],
+        implementation=slots["implementation"] or direct_implementation,
         admin=slots["admin"],
         beacon=slots["beacon"],
         beacon_implementation=beacon_implementation,

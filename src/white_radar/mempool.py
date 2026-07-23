@@ -25,6 +25,7 @@ from white_radar.telegram import TelegramNotifier
 
 LOGGER = logging.getLogger(__name__)
 ALCHEMY_FILTERED_PENDING_CHAINS = frozenset({1, 137, 11155111})
+ROUTINE_TOKEN_SELECTORS = frozenset({"0xa9059cbb", "0x095ea7b3", "0x23b872dd"})
 
 
 def pending_subscription_request(
@@ -275,6 +276,7 @@ async def _handle_message(
         return
     calldata = str(transaction.get("input") or "0x")
     selector = calldata[:10].lower() if len(calldata) >= 10 else "0x"
+    routine_selector = selector in ROUTINE_TOKEN_SELECTORS
     native_value = hex_to_int(str(transaction.get("value") or "0x0"))
     sender = str(transaction.get("from") or "").lower() or None
     policy = (policy_book or PolicyBook.empty()).contract(chain.chain_id, destination)
@@ -293,11 +295,47 @@ async def _handle_message(
         protocol=watched.protocol,
         critical_selector=selector in watched.critical_selectors or policy_critical,
         native_value_wei=native_value,
+        routine_selector=routine_selector,
     )
-    final_score = min(100, score.score + (assessment.score_delta if assessment else 0))
+    policy_finding_count = len(assessment.findings) if assessment else 0
+    policy_correlation_bonus = (
+        20 if policy_finding_count >= 3 else 10 if policy_finding_count >= 2 else 0
+    )
+    policy_delta = min(80, assessment.score_delta + policy_correlation_bonus) if assessment else 0
+    final_score = min(100, score.score + policy_delta)
     reasons = score.reasons + (
         tuple(finding.reason for finding in assessment.findings) if assessment else ()
     )
+    if policy_correlation_bonus:
+        reasons += (
+            f"{policy_finding_count} independent policy deviations were correlated in one call.",
+        )
+    observed_at = utc_now()
+    if (
+        final_score < 30
+        and not policy_critical
+        and selector not in watched.critical_selectors
+        and not (assessment and assessment.findings)
+    ):
+        store.record_pending_telemetry(
+            chain_id=chain.chain_id,
+            contract_address=destination,
+            selector=selector,
+            protocol=watched.protocol,
+            tx_hash=tx_hash,
+            observed_at=observed_at,
+        )
+        LOGGER.debug(
+            "pending observation aggregated",
+            extra=log_context(
+                chain=chain.name,
+                protocol=watched.protocol,
+                contract=destination,
+                selector=selector,
+                routine_selector=routine_selector,
+            ),
+        )
+        return
     decoded_call = None
     if abi_resolver:
         decoded_call = await asyncio.to_thread(
@@ -319,22 +357,35 @@ async def _handle_message(
         )
         final_score = min(100, final_score + simulation.score_delta)
         reasons += tuple(item.summary for item in simulation.findings)
+    recommended_action = score.recommended_action
+    if (
+        assessment
+        and assessment.findings
+        and not (policy_critical or selector in watched.critical_selectors)
+    ):
+        recommended_action = (
+            "Review the correlated policy deviations, decoded call, and state-pinned simulation "
+            "before classifying or escalating the case."
+        )
     event = RadarEvent(
         event_id=stable_event_id("pending_watch", chain.chain_id, tx_hash),
-        observed_at=utc_now(),
+        observed_at=observed_at,
         event_type="pending_watch",
-        title="Pending transaction to protocol inventory contract",
-        summary=f"Pending transaction targets {watched.protocol} ({watched.role}).",
+        title="Pending transaction requires protocol review",
+        summary=(
+            f"Pending transaction to {watched.protocol} ({watched.role}) was promoted by "
+            "protocol-specific evidence."
+        ),
         chain=chain.name,
         chain_id=chain.chain_id,
         score=final_score,
         severity=severity_for_score(final_score),
         confidence=min(
             0.98,
-            score.confidence + (0.05 if assessment and assessment.findings else 0),
+            score.confidence + min(0.25, policy_finding_count * 0.05),
         ),
         reasons=reasons,
-        recommended_action=score.recommended_action,
+        recommended_action=recommended_action,
         subject_address=destination,
         deployer_address=sender,
         tx_hash=tx_hash.lower(),
@@ -343,6 +394,7 @@ async def _handle_message(
             "protocol": watched.protocol,
             "role": watched.role,
             "selector": selector,
+            "routine_selector": routine_selector,
             "function_signature": decoded_call.signature if decoded_call else None,
             "decoded_arguments": decoded_call.arguments if decoded_call else {},
             "abi_source": decoded_call.source if decoded_call else None,
@@ -360,6 +412,7 @@ async def _handle_message(
             "subscription_type": subscription_type,
             "policy_configured": policy is not None,
             "policy_baseline_match": assessment.baseline_match if assessment else None,
+            "policy_correlation_bonus": policy_correlation_bonus,
             "policy_findings": (
                 [finding.to_dict() for finding in assessment.findings] if assessment else []
             ),
@@ -414,7 +467,8 @@ async def _handle_message(
             evidence={"transaction": tx_hash, "selector": selector},
             observed_at=event.observed_at,
         )
-    LOGGER.warning("pending watch event", extra=log_context(**event.to_dict()))
+    log_method = LOGGER.warning if event.score >= incident_minimum_score else LOGGER.info
+    log_method("pending review case", extra=log_context(**event.to_dict()))
     if notifier.should_send(event, chain):
         try:
             if await asyncio.to_thread(notifier.send, event, chain):

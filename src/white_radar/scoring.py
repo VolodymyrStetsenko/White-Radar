@@ -109,21 +109,36 @@ def score_pending(
     protocol: str,
     critical_selector: bool,
     native_value_wei: int,
+    routine_selector: bool = False,
 ) -> ScoreResult:
-    score = 60
-    confidence = 0.65
-    reasons = [f"A pending transaction targets watched protocol {protocol}."]
+    score = 0 if routine_selector else 10
+    confidence = 0.9 if routine_selector else 0.55
+    reasons = [f"A pending transaction targets protocol inventory entry {protocol}."]
+    if routine_selector:
+        reasons.append(
+            "The selector is a routine token operation and is retained only as aggregated "
+            "telemetry."
+        )
     if critical_selector:
-        score += 20
-        confidence += 0.1
+        score = max(score, 75)
+        confidence = max(confidence, 0.85)
         reasons.append("The selector is marked critical by the protocol-specific watchlist.")
     if native_value_wei > 0:
         score += 5
         reasons.append("The transaction includes native asset value.")
-    action = (
-        "Review the policy baseline, decoded function, state-pinned simulation, related "
-        "addresses, and protocol change window; escalate unexpected behavior."
-    )
+    if critical_selector:
+        action = (
+            "Compare the call with the protocol baseline, decode the function, run state-pinned "
+            "simulation, correlate the protocol change window, and preserve supporting evidence "
+            "for operator review."
+        )
+    elif routine_selector:
+        action = "No case action. Retain the observation as hourly aggregated telemetry."
+    else:
+        action = (
+            "Retain as telemetry unless policy, simulation, or correlated evidence promotes it "
+            "into an investigation case."
+        )
     return ScoreResult(min(100, score), min(0.95, confidence), tuple(reasons), action)
 
 

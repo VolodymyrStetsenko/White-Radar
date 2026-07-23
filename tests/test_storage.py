@@ -124,6 +124,8 @@ class StorageTests(unittest.TestCase):
                     "identity_edges": 1,
                     "abi_catalogs": 0,
                     "invariant_states": 0,
+                    "pending_telemetry_observations": 0,
+                    "pending_telemetry_buckets": 0,
                 },
             )
             due = store.profiles_due_for_refresh(

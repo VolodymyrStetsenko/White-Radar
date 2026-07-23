@@ -61,6 +61,21 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_recent
 ON events (observed_at DESC);
 
+CREATE TABLE IF NOT EXISTS pending_telemetry (
+    chain_id INTEGER NOT NULL,
+    contract_address TEXT NOT NULL,
+    selector TEXT NOT NULL,
+    hour_bucket TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    observation_count INTEGER NOT NULL,
+    last_observed_at TEXT NOT NULL,
+    last_tx_hash TEXT NOT NULL,
+    PRIMARY KEY (chain_id, contract_address, selector, hour_bucket)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_telemetry_recent
+ON pending_telemetry (last_observed_at DESC);
+
 CREATE TABLE IF NOT EXISTS contract_profiles (
     chain_id INTEGER NOT NULL,
     address TEXT NOT NULL,
@@ -345,6 +360,89 @@ class RadarStore:
                 ),
             )
             return cursor.rowcount == 1
+
+    def record_pending_telemetry(
+        self,
+        *,
+        chain_id: int,
+        contract_address: str,
+        selector: str,
+        protocol: str,
+        tx_hash: str,
+        observed_at: str,
+    ) -> None:
+        """Aggregate routine pending observations without creating events or graph nodes."""
+
+        try:
+            observed = dt.datetime.fromisoformat(observed_at)
+        except ValueError:
+            observed = dt.datetime.now(dt.UTC)
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=dt.UTC)
+        normalized_observed_at = observed.astimezone(dt.UTC).isoformat(timespec="seconds")
+        hour_bucket = (
+            observed.astimezone(dt.UTC)
+            .replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            .isoformat(timespec="seconds")
+        )
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pending_telemetry(
+                    chain_id, contract_address, selector, hour_bucket, protocol,
+                    observation_count, last_observed_at, last_tx_hash
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(chain_id, contract_address, selector, hour_bucket) DO UPDATE SET
+                    observation_count = pending_telemetry.observation_count + 1,
+                    protocol = excluded.protocol,
+                    last_tx_hash = CASE
+                        WHEN excluded.last_observed_at >= pending_telemetry.last_observed_at
+                        THEN excluded.last_tx_hash
+                        ELSE pending_telemetry.last_tx_hash
+                    END,
+                    last_observed_at = MAX(
+                        pending_telemetry.last_observed_at,
+                        excluded.last_observed_at
+                    )
+                """,
+                (
+                    chain_id,
+                    contract_address.lower(),
+                    selector.lower(),
+                    hour_bucket,
+                    protocol[:200],
+                    normalized_observed_at,
+                    tx_hash.lower(),
+                ),
+            )
+
+    def pending_telemetry_since(
+        self,
+        *,
+        hours: int,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        since = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=max(1, hours))).isoformat()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT chain_id, contract_address, selector, protocol,
+                       SUM(observation_count) AS observation_count,
+                       MAX(last_observed_at) AS last_observed_at,
+                       MAX(last_tx_hash) AS last_tx_hash
+                FROM pending_telemetry
+                WHERE last_observed_at >= ?
+                GROUP BY chain_id, contract_address, selector, protocol
+                ORDER BY observation_count DESC, last_observed_at DESC
+                LIMIT ?
+                """,
+                (since, max(1, min(5000, limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _incident_from_row(row: sqlite3.Row) -> IncidentRecord:
@@ -1072,12 +1170,22 @@ class RadarStore:
             invariants = int(
                 connection.execute("SELECT COUNT(*) FROM invariant_states").fetchone()[0]
             )
+            telemetry_observations = int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(observation_count), 0) FROM pending_telemetry"
+                ).fetchone()[0]
+            )
+            telemetry_buckets = int(
+                connection.execute("SELECT COUNT(*) FROM pending_telemetry").fetchone()[0]
+            )
         return {
             "profiles": profiles,
             "identity_nodes": nodes,
             "identity_edges": edges,
             "abi_catalogs": abi_catalogs,
             "invariant_states": invariants,
+            "pending_telemetry_observations": telemetry_observations,
+            "pending_telemetry_buckets": telemetry_buckets,
         }
 
     def mark_alerted(self, event_id: str) -> None:

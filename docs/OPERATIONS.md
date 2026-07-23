@@ -2,17 +2,19 @@
 
 ## Workload topology
 
-A complete single-host deployment separates five workloads:
+A complete single-host deployment separates one on-demand workflow and five service workloads:
 
 | Workload | Process | Cadence |
 |---|---|---|
+| Transaction investigation | `white-radar investigate` | On demand per confirmed transaction |
 | Confirmed ingestion | `white-radar daemon` | Continuous |
-| Pending observation | `white-radar watch-pending --chain NAME` | Continuous per chain |
+| Quiet protocol guard | `white-radar watch-pending --chain NAME` | Continuous per selected chain |
 | Profile refresh | `white-radar refresh-profiles` | Scheduled |
 | Digest | `white-radar digest` | Scheduled |
 | Health verification | `white-radar health` | Scheduled and externally observed |
 
-All workloads share the same configuration and SQLite database. WAL mode supports the expected
+Service workloads share the same configuration and SQLite database. Investigation bundles are
+written under `evidence/` or an explicit output directory. WAL mode supports the expected
 single-host concurrency. Do not run multiple confirmed scanners for the same chain/database.
 
 ## Local installation
@@ -39,6 +41,14 @@ white-radar check-invariants --chain ethereum
 white-radar refresh-profiles --chain ethereum --limit 10 --min-age-minutes 0
 white-radar status
 white-radar preview-alert
+```
+
+Create one investigation bundle independently of the inventory:
+
+```bash
+white-radar investigate \
+  --chain ethereum \
+  --tx-hash 0xCONFIRMED_TRANSACTION_HASH
 ```
 
 Run continuous workloads in separate terminals:
@@ -96,7 +106,7 @@ Operational impact:
 
 | Setting | RPC/external cost |
 |---|---|
-| `abi_resolution_enabled` | Explorer request on uncached verified contracts |
+| `abi_resolution_enabled` | Explorer request on uncached investigation or promoted-guard contracts |
 | `pending_simulation_enabled` | One `eth_call` for selected pending cases |
 | `trace_call_enabled` | One provider-specific `debug_traceCall` for selected cases |
 | `invariant_checks_enabled` | One `eth_call` per configured invariant per scanner cycle |

@@ -168,7 +168,7 @@ class ChainScanner:
     def _state_value(value: object) -> str | None:
         if value is None:
             return None
-        if isinstance(value, (dict, list, tuple)):
+        if isinstance(value, dict | list | tuple):
             return json.dumps(value, sort_keys=True, separators=(",", ":"))
         return str(value)
 
