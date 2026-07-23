@@ -3,7 +3,7 @@
 White Radar builds reproducible technical context from confirmed chain state, provider
 observations, verified metadata, and local protocol configuration.
 
-## Transaction investigation
+## Transaction reconstruction
 
 ```bash
 white-radar investigate \
@@ -11,8 +11,10 @@ white-radar investigate \
   --tx-hash 0xCONFIRMED_TRANSACTION_HASH
 ```
 
-The investigator reconstructs the transaction receipt, exact call graph when available, standard
-token and native-value flows, entities, relationships, proxy context, and historical replay into a
+The investigator treats the supplied hash as a seed, searches a bounded block window before and
+after it, and reconstructs evidence-linked transactions. It combines transaction/receipt evidence,
+exact call graphs when available, normal/internal/token history, token and native-value flows,
+entities, relationships, ABI confidence, proxy context, and historical replay into a
 hash-manifested case bundle. It does not require protocol inventory. See
 [Transaction incident investigation](INVESTIGATION.md).
 
@@ -40,6 +42,10 @@ catalog. It:
 - stores the canonical ABI SHA-256 and selector map;
 - decodes only bounded static arguments;
 - marks dynamic arguments without copying their value.
+
+When verified metadata is unavailable, a bounded built-in catalog can provide an explicitly
+unverified candidate label for common token, proxy, ownership, and role selectors. Each call keeps
+its source and confidence so hints cannot be confused with verified ABI evidence.
 
 ```bash
 white-radar abi \
@@ -138,9 +144,10 @@ and current observations.
 
 ## Incident reports
 
-Transaction investigations use a multi-artifact bundle containing canonical JSON, CSV, Markdown,
-HTML, GraphML, and an integrity manifest. The `report` command below remains available for
-event-driven protocol guard cases stored in SQLite.
+Transaction reconstructions use a multi-artifact bundle containing canonical JSON, transaction,
+call, transfer, entity, relationship and timeline CSVs, Markdown, interactive HTML, GraphML, and an
+integrity manifest. The `report` command below remains available for event-driven protocol guard
+cases stored in SQLite.
 
 ```bash
 white-radar report --event-id CASE_ID --output evidence/CASE_ID.md

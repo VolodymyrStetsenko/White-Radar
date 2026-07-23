@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.common import ETHEREUM
-from white_radar.abi import DecodedCall
+from white_radar.abi import DecodedCall, DecodedEvent
 from white_radar.case_bundle import BUNDLE_FILES, write_case_bundle
 from white_radar.enrichment import EIP1967_SLOTS
 from white_radar.investigation import (
@@ -42,6 +42,25 @@ class FakeResolver:
     ) -> DecodedCall:
         signature = "execute(uint256)" if address == TARGET else None
         return DecodedCall(calldata[:10], signature, {"amount": 7}, "fixture", "f" * 64)
+
+    def resolve_event(
+        self,
+        chain_id: int,
+        address: str,
+        topics: list[str],
+        data: str,
+    ) -> DecodedEvent | None:
+        del chain_id, data
+        if address != TOKEN or not topics or topics[0] != TRANSFER_TOPIC:
+            return None
+        return DecodedEvent(
+            topic0=topics[0],
+            signature="Transfer(address,address,uint256)",
+            name="Transfer",
+            arguments={"value": 1_000},
+            source="fixture ABI",
+            abi_sha256="e" * 64,
+        )
 
 
 class InvestigationRpc:
@@ -120,6 +139,27 @@ class InvestigationRpc:
             ],
         }
 
+    def trace_transaction_state_diff(self, tx_hash: str) -> dict[str, Any]:
+        del tx_hash
+        return {
+            "pre": {
+                TARGET: {
+                    "balance": "0xa",
+                    "nonce": "0x1",
+                    "code": "0x6000",
+                    "storage": {"0x01": "0x02"},
+                }
+            },
+            "post": {
+                TARGET: {
+                    "balance": "0x5",
+                    "nonce": "0x2",
+                    "code": "0x6000",
+                    "storage": {"0x01": "0x03"},
+                }
+            },
+        }
+
     def storage_at(self, address: str, slot: str, block: str = "latest") -> str:
         assert slot in EIP1967_SLOTS.values()
         return "0x" + "00" * 32
@@ -149,13 +189,32 @@ class InvestigationTests(unittest.TestCase):
             [item.amount for item in case.transfers if item.asset_type == "native"],
             ["10", "5"],
         )
+        self.assertTrue(all(item.execution_effect == "committed" for item in case.transfers))
+        self.assertTrue(all(item.execution_effect == "committed" for item in case.calls))
         delegate_edge = next(item for item in case.relationships if item.relation == "DELEGATECALL")
         self.assertIsNone(delegate_edge.amount)
         self.assertEqual(case.transfers[-1].amount, "1000")
         self.assertEqual(case.root_call.signature, "execute(uint256)")  # type: ignore[union-attr]
+        self.assertEqual(case.calls[0].decoded_arguments, {"amount": 7})
+        self.assertEqual(case.events[0].event_signature, "Transfer(address,address,uint256)")
+        self.assertEqual(case.events[0].decode_confidence, "verified")
+        self.assertEqual(case.calls[0].calldata_bytes, 36)
+        self.assertEqual(
+            case.calls[0].calldata_sha256,
+            hashlib.sha256(bytes.fromhex(case.calls[0].calldata[2:])).hexdigest(),
+        )
+        target_entity = next(item for item in case.entities if item.address == TARGET)
+        self.assertEqual(target_entity.code_bytes, 2)
+        self.assertEqual(
+            target_entity.runtime_code_sha256,
+            hashlib.sha256(bytes.fromhex("6000")).hexdigest(),
+        )
         self.assertTrue(case.trace_available)
         self.assertEqual(case.historical_replay.block_number, 99)  # type: ignore[union-attr]
         self.assertIn("delegated_execution", {item.code for item in case.findings})
+        self.assertIn("verified_event_evidence", {item.code for item in case.findings})
+        self.assertIn("state_changes_observed", {item.code for item in case.findings})
+        self.assertEqual(case.state_diff.storage_change_count, 1)  # type: ignore[union-attr]
         self.assertIn(TOKEN, {item.address for item in case.entities})
 
     def test_trace_unavailability_preserves_receipt_analysis(self) -> None:
@@ -176,6 +235,79 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(case.transfers[0].evidence_ref, "transaction")
         self.assertEqual(case.transfers[0].source, "transaction")
         self.assertTrue(any("Call tracing is unavailable" in item for item in case.warnings))
+
+    def test_reverted_transaction_keeps_attempts_out_of_committed_flow(self) -> None:
+        class RevertedRpc(InvestigationRpc):
+            def receipt(self, tx_hash: str) -> dict[str, Any] | None:
+                receipt = super().receipt(tx_hash)
+                assert receipt is not None
+                receipt["status"] = "0x0"
+                receipt["logs"] = []
+                return receipt
+
+        case = investigate_transaction(
+            RevertedRpc(),  # type: ignore[arg-type]
+            ETHEREUM,
+            TX_HASH,
+            replay_prestate=False,
+        )
+        self.assertEqual(case.transaction_status, "reverted")
+        self.assertTrue(case.transfers)
+        self.assertTrue(
+            all(item.execution_effect == "attempted_reverted" for item in case.transfers)
+        )
+        self.assertTrue(all(item.execution_effect == "attempted_reverted" for item in case.calls))
+        self.assertIn("attempted_reverted_asset_flow", {item.code for item in case.findings})
+        self.assertNotIn("native_asset_flow", {item.code for item in case.findings})
+
+    def test_failed_subcall_marks_its_entire_subtree_as_attempted(self) -> None:
+        class CaughtFailureRpc(InvestigationRpc):
+            def trace_transaction(self, tx_hash: str) -> dict[str, Any]:
+                return {
+                    "type": "CALL",
+                    "from": ORIGIN,
+                    "to": TARGET,
+                    "input": "0x",
+                    "value": "0xa",
+                    "calls": [
+                        {
+                            "type": "CALL",
+                            "from": TARGET,
+                            "to": IMPLEMENTATION,
+                            "input": "0x",
+                            "value": "0x7",
+                            "error": "execution reverted",
+                            "calls": [
+                                {
+                                    "type": "CALL",
+                                    "from": IMPLEMENTATION,
+                                    "to": RECIPIENT,
+                                    "input": "0x",
+                                    "value": "0x3",
+                                }
+                            ],
+                        },
+                        {
+                            "type": "CALL",
+                            "from": TARGET,
+                            "to": RECIPIENT,
+                            "input": "0x",
+                            "value": "0x4",
+                        },
+                    ],
+                }
+
+        case = investigate_transaction(
+            CaughtFailureRpc(),  # type: ignore[arg-type]
+            ETHEREUM,
+            TX_HASH,
+            replay_prestate=False,
+        )
+        effects = {item.path: item.execution_effect for item in case.calls}
+        self.assertEqual(effects["0"], "committed")
+        self.assertEqual(effects["0.0"], "attempted_reverted")
+        self.assertEqual(effects["0.0.0"], "attempted_reverted")
+        self.assertEqual(effects["0.1"], "committed")
 
     def test_decodes_erc721_and_erc1155_transfer_logs(self) -> None:
         def word(value: int) -> str:
@@ -306,6 +438,7 @@ class InvestigationTests(unittest.TestCase):
             result = write_case_bundle(case, destination)
             self.assertEqual({item.name for item in result.files}, set(BUNDLE_FILES))
             manifest = json.loads(result.manifest.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], 3)
             for item in manifest["files"]:
                 path = destination / item["path"]
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), item["sha256"])
@@ -314,6 +447,8 @@ class InvestigationTests(unittest.TestCase):
                 "White Radar investigation graph",
                 (destination / "graph.html").read_text(),
             )
+            self.assertIn("event_signature", (destination / "events.csv").read_text())
+            self.assertIn(TARGET, (destination / "state_changes.csv").read_text())
             with self.assertRaises(FileExistsError):
                 write_case_bundle(case, destination)
 

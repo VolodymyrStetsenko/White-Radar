@@ -129,3 +129,21 @@ max_blocks_per_cycle = 30
 monitor_global_upgrades = false
 pending_subscription = "auto"
 trace_internal_creations = false
+
+[[chains]]
+name = "monad"
+display_name = "Monad"
+chain_id = 143
+enabled = false
+is_testnet = false
+rpc_http_env = "RPC_MONAD_HTTP"
+rpc_ws_env = "RPC_MONAD_WS"
+rpc_http_fallback_envs = ["RPC_MONAD_HTTP_SECONDARY"]
+rpc_ws_fallback_envs = ["RPC_MONAD_WS_SECONDARY"]
+explorer_url = "https://monadvision.com"
+confirmations = 1
+initial_lookback_blocks = 5
+max_blocks_per_cycle = 20
+monitor_global_upgrades = false
+pending_subscription = "auto"
+trace_internal_creations = false

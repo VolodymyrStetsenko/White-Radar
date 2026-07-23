@@ -25,6 +25,11 @@ class ConfigurationTests(unittest.TestCase):
             settings.chain_by_name("ethereum").rpc_http_fallback_envs,
             ("RPC_ETHEREUM_HTTP_SECONDARY",),
         )
+        monad = settings.chain_by_name("monad")
+        self.assertEqual(monad.chain_id, 143)
+        self.assertEqual(monad.rpc_http_env, "RPC_MONAD_HTTP")
+        self.assertEqual(monad.rpc_ws_env, "RPC_MONAD_WS")
+        self.assertFalse(monad.enabled)
 
     def test_resolves_unique_rpc_fallbacks_from_environment(self) -> None:
         with patch.dict(

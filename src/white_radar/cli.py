@@ -24,18 +24,32 @@ from white_radar.config import (
     load_settings,
     load_watchlist,
 )
-from white_radar.investigation import investigate_transaction, validate_transaction_hash
+from white_radar.history import (
+    CompositeHistorySource,
+    EtherscanHistorySource,
+    HistorySource,
+    RpcWindowHistorySource,
+)
+from white_radar.investigation import (
+    EXECUTION_ATTEMPTED_REVERTED,
+    EXECUTION_COMMITTED,
+    investigate_transaction,
+    validate_transaction_hash,
+)
 from white_radar.logging import configure_logging, log_context
 from white_radar.mempool import watch_pending_transactions
 from white_radar.models import ChainConfig, IncidentStatus, RadarEvent
 from white_radar.monitor import ChainScanner
 from white_radar.policy import load_policy_book
 from white_radar.proxy import inspect_proxy
+from white_radar.reconstruction import ReconstructionLimits, reconstruct_attack_case
+from white_radar.reconstruction_bundle import write_reconstruction_bundle
 from white_radar.reporting import render_digest, render_incident_report
 from white_radar.rpc import JsonRpcClient
 from white_radar.simulation import simulate_transaction
 from white_radar.storage import RadarStore
 from white_radar.telegram import TelegramNotifier, render_event
+from white_radar.token_metadata import TokenMetadataResolver
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,13 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     investigate = subparsers.add_parser(
         "investigate",
-        help="Reconstruct one confirmed transaction into an evidence case bundle.",
+        help="Expand a confirmed seed transaction into a bounded incident evidence bundle.",
     )
     investigate.add_argument("--chain", required=True, help="One configured chain name.")
     investigate.add_argument(
         "--tx-hash",
         required=True,
-        help="Confirmed transaction hash; no watchlist entry is required.",
+        help="Confirmed seed transaction hash; it may be any transaction in the incident.",
     )
     investigate.add_argument(
         "--output",
@@ -83,11 +97,82 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the read-only eth_call replay at transaction block minus one.",
     )
     investigate.add_argument(
+        "--no-state-diff",
+        action="store_false",
+        dest="state_diff",
+        help="Skip prestateTracer diff-mode collection when the provider does not support it.",
+    )
+    investigate.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace known files in an existing case directory.",
     )
-    investigate.set_defaults(trace=True, replay=True)
+    investigate.add_argument(
+        "--single-transaction",
+        action="store_true",
+        help="Disable cross-transaction expansion and export only the seed transaction.",
+    )
+    investigate.add_argument(
+        "--backward-blocks",
+        type=int,
+        default=256,
+        help="Maximum blocks searched before the seed transaction (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--forward-blocks",
+        type=int,
+        default=512,
+        help="Maximum blocks searched after the seed transaction (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--max-hops",
+        type=int,
+        default=3,
+        help="Maximum address-to-transaction expansion hops (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--max-transactions",
+        type=int,
+        default=100,
+        help="Maximum reconstructed transactions including the seed (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--max-addresses",
+        type=int,
+        default=64,
+        help="Maximum frontier addresses queried for history (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--history-records-per-address",
+        type=int,
+        default=200,
+        help="Maximum indexed history records retained per address (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--hub-min-records",
+        type=int,
+        default=64,
+        help="History-record threshold for high-fanout hub detection (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--hub-min-counterparties",
+        type=int,
+        default=32,
+        help="Unique-counterparty threshold for hub detection (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--max-hub-candidates",
+        type=int,
+        default=12,
+        help="Maximum candidate transactions retained per detected hub (default: %(default)s).",
+    )
+    investigate.add_argument(
+        "--history-source",
+        choices=("auto", "etherscan", "rpc"),
+        default="auto",
+        help="Cross-transaction discovery source (default: %(default)s).",
+    )
+    investigate.set_defaults(trace=True, replay=True, state_diff=True)
 
     doctor = subparsers.add_parser("doctor", help="Validate configuration and RPC identity.")
     doctor.add_argument("--online", action="store_true", help="Call enabled RPC endpoints.")
@@ -603,8 +688,12 @@ def cmd_investigate(
     tx_hash: str,
     output: Path | None,
     trace: bool,
+    state_diff: bool,
     replay: bool,
     overwrite: bool,
+    single_transaction: bool,
+    limits: ReconstructionLimits,
+    history_source: str,
 ) -> int:
     chain = settings.chain_by_name(chain_name)
     normalized_hash = validate_transaction_hash(tx_hash)
@@ -617,35 +706,130 @@ def cmd_investigate(
         if settings.analysis.abi_resolution_enabled
         else None
     )
+    rpc = _rpc_for_chain(settings, chain)
     case = investigate_transaction(
-        _rpc_for_chain(settings, chain),
+        rpc,
         chain,
         normalized_hash,
         resolver=resolver,
         watchlist=watchlist,
         include_trace=trace,
+        include_state_diff=state_diff,
         replay_prestate=replay,
+    )
+    token_metadata = TokenMetadataResolver(rpc)
+    case = token_metadata.enrich_case(case)
+    if single_transaction:
+        destination = (
+            output.expanduser().resolve()
+            if output
+            else (settings.root / "evidence" / case.case_id).resolve()
+        )
+        try:
+            bundle = write_case_bundle(case, destination, overwrite=overwrite)
+        except FileExistsError as exc:
+            raise ValueError(str(exc)) from exc
+        committed_transfers = sum(
+            item.execution_effect == EXECUTION_COMMITTED for item in case.transfers
+        )
+        reverted_transfer_attempts = sum(
+            item.execution_effect == EXECUTION_ATTEMPTED_REVERTED for item in case.transfers
+        )
+        print(
+            json.dumps(
+                {
+                    "tool": {"name": "WhiteRadar Incident", "version": __version__},
+                    "case_id": case.case_id,
+                    "mode": "single_transaction",
+                    "transaction_hash": case.transaction_hash,
+                    "status": case.transaction_status,
+                    "calls": len(case.calls),
+                    "events": len(case.events),
+                    "transfers": len(case.transfers),
+                    "committed_transfers": committed_transfers,
+                    "reverted_transfer_attempts": reverted_transfer_attempts,
+                    "state_accounts": len(case.state_diff.accounts) if case.state_diff else 0,
+                    "entities": len(case.entities),
+                    "findings": len(case.findings),
+                    "warnings": list(case.warnings),
+                    "bundle": bundle.to_dict(),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    rpc_history = RpcWindowHistorySource(
+        rpc,
+        max_blocks=max(1, limits.backward_blocks + limits.forward_blocks + 1),
+    )
+    selected_history: HistorySource
+    if history_source == "rpc":
+        selected_history = rpc_history
+    else:
+        indexed = EtherscanHistorySource(
+            timeout=settings.app.request_timeout_seconds,
+            retries=settings.app.request_retries,
+        )
+        if history_source == "etherscan":
+            if not indexed.configured:
+                raise ConfigurationError(
+                    "ETHERSCAN_API_KEY is required when --history-source etherscan is selected"
+                )
+            selected_history = indexed
+        else:
+            selected_history = CompositeHistorySource(
+                indexed if indexed.configured else None,
+                rpc_history,
+            )
+    reconstruction = reconstruct_attack_case(
+        rpc,
+        chain,
+        case,
+        selected_history,
+        limits=limits,
+        resolver=resolver,
+        watchlist=watchlist,
+        token_metadata=token_metadata,
+        include_trace=trace,
+        include_state_diff=state_diff,
     )
     destination = (
         output.expanduser().resolve()
         if output
-        else (settings.root / "evidence" / case.case_id).resolve()
+        else (settings.root / "evidence" / reconstruction.reconstruction_id).resolve()
     )
     try:
-        bundle = write_case_bundle(case, destination, overwrite=overwrite)
+        bundle = write_reconstruction_bundle(reconstruction, destination, overwrite=overwrite)
     except FileExistsError as exc:
         raise ValueError(str(exc)) from exc
+    all_transfers = [
+        transfer for item in reconstruction.transactions for transfer in item.transfers
+    ]
+    committed_transfers = sum(
+        item.execution_effect == EXECUTION_COMMITTED for item in all_transfers
+    )
+    reverted_transfer_attempts = sum(
+        item.execution_effect == EXECUTION_ATTEMPTED_REVERTED for item in all_transfers
+    )
     print(
         json.dumps(
             {
-                "case_id": case.case_id,
-                "transaction_hash": case.transaction_hash,
-                "status": case.transaction_status,
-                "calls": len(case.calls),
-                "transfers": len(case.transfers),
-                "entities": len(case.entities),
-                "findings": len(case.findings),
-                "warnings": list(case.warnings),
+                "tool": {
+                    "name": reconstruction.tool_name,
+                    "version": reconstruction.tool_version,
+                },
+                "case_id": reconstruction.reconstruction_id,
+                "mode": "cross_transaction_reconstruction",
+                "seed_transaction_hash": reconstruction.seed_transaction_hash,
+                "transactions": len(reconstruction.transactions),
+                "core_transactions": reconstruction.coverage.core_transactions,
+                "committed_transfers": committed_transfers,
+                "reverted_transfer_attempts": reverted_transfer_attempts,
+                "relationships": len(reconstruction.edges),
+                "entities": len(reconstruction.entities),
+                "coverage": reconstruction.coverage.to_dict(),
+                "warnings": list(reconstruction.warnings),
                 "bundle": bundle.to_dict(),
             },
             indent=2,
@@ -749,8 +933,22 @@ def main(argv: list[str] | None = None) -> None:
                 tx_hash=args.tx_hash,
                 output=args.output,
                 trace=args.trace,
+                state_diff=args.state_diff,
                 replay=args.replay,
                 overwrite=args.overwrite,
+                single_transaction=args.single_transaction,
+                limits=ReconstructionLimits(
+                    backward_blocks=args.backward_blocks,
+                    forward_blocks=args.forward_blocks,
+                    max_hops=args.max_hops,
+                    max_transactions=args.max_transactions,
+                    max_frontier_addresses=args.max_addresses,
+                    history_records_per_address=args.history_records_per_address,
+                    hub_min_records=args.hub_min_records,
+                    hub_min_counterparties=args.hub_min_counterparties,
+                    max_hub_candidate_transactions=args.max_hub_candidates,
+                ),
+                history_source=args.history_source,
             )
         elif args.command == "doctor":
             code = cmd_doctor(settings, watchlist, online=args.online)

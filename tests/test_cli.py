@@ -47,6 +47,26 @@ class CliTests(unittest.TestCase):
         )
         self.assertTrue(investigation.trace)
         self.assertTrue(investigation.replay)
+        self.assertTrue(investigation.state_diff)
+        self.assertFalse(investigation.single_transaction)
+        self.assertEqual(investigation.backward_blocks, 256)
+        self.assertEqual(investigation.forward_blocks, 512)
+        self.assertEqual(investigation.max_hops, 3)
+        self.assertEqual(investigation.hub_min_records, 64)
+        self.assertEqual(investigation.hub_min_counterparties, 32)
+        self.assertEqual(investigation.max_hub_candidates, 12)
+        self.assertEqual(investigation.history_source, "auto")
+        without_state = parser.parse_args(
+            [
+                "investigate",
+                "--chain",
+                "ethereum",
+                "--tx-hash",
+                "0x" + "11" * 32,
+                "--no-state-diff",
+            ]
+        )
+        self.assertFalse(without_state.state_diff)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"

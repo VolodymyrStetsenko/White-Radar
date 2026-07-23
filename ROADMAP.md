@@ -2,11 +2,11 @@
 
 ## Product direction
 
-White Radar is developed as a transaction-centric EVM incident investigator with a quiet,
+WhiteRadar Incident is developed as a transaction-centric EVM incident investigator with a quiet,
 protocol-specific guard. Investigation depth and evidence quality take priority over broad,
 high-volume alert generation.
 
-## Delivered investigation foundation
+## Delivered investigation and reconstruction foundation
 
 - [x] one-command investigation from a confirmed transaction hash without a watchlist requirement;
 - [x] transaction, receipt, block, fee, and execution-status reconstruction;
@@ -23,26 +23,45 @@ high-volume alert generation.
 - [x] routine mempool token calls aggregated as telemetry instead of per-transaction cases;
 - [x] policy- and critical-selector-based pending promotion;
 - [x] read-only multi-chain RPC boundary, chain-ID validation, provider failover, and secret scanning.
+- [x] bounded backward/forward expansion from any confirmed seed transaction;
+- [x] indexed normal/internal/ERC-20/ERC-721/ERC-1155 history with bounded JSON-RPC fallback;
+- [x] deterministic candidate ranking, per-hop discovery reasons, source provenance, and coverage
+  counters;
+- [x] cross-transaction chronology, transaction/address graph, call edges, and per-asset flow
+  ledger;
+- [x] transaction/address/cycle deduplication with hard block, hop, address, history, and transaction
+  limits;
+- [x] block-pinned ERC-20 name, symbol, decimals, raw amount, and exact display amount;
+- [x] verified ABI confidence plus explicitly unverified built-in selector hints;
+- [x] self-contained graph search, node/relation filters, zoom/pan, fit, evidence details, and
+  portable GraphML;
+- [x] Ethereum, Base, Arbitrum, OP Mainnet, Polygon, Sepolia, and Monad configuration templates.
+- [x] committed-versus-reverted call-tree and asset-flow semantics;
+- [x] compact seed-plus-one-hop core candidate path alongside the complete bounded graph;
+- [x] high-fanout hub detection, bounded expansion, and explicit suppression accounting.
 
 ## Highest-priority investigation work
 
 ### Bounded multi-transaction fund flow
 
-- [ ] expand forward and backward from seed entities inside explicit block/time, depth, and
+- [x] expand forward and backward from seed entities inside explicit block, depth, and
   transaction-count limits;
-- [ ] combine normal transactions, internal value transfers, and standard token transfers into one
+- [x] combine normal transactions, internal value transfers, and standard token transfers into one
   cross-transaction graph;
-- [ ] maintain per-hop provenance and raw integer asset accounting without implying ownership or
+- [x] maintain per-hop provenance and raw integer asset accounting without implying ownership or
   intent;
-- [ ] deduplicate cycles, high-volume exchange routers, and service addresses;
+- [x] detect and bound high-volume hub fan-out without hiding retained evidentiary transfers;
+- [ ] attach source-backed exchange, router, and service classifications to detected hubs;
 - [ ] checkpoint long investigations and resume deterministically;
-- [ ] export graph slices and per-asset flow ledgers for each investigation branch.
+- [x] export a cross-transaction graph and per-asset flow ledger;
+- [ ] export analyst-selected branch slices and conservation summaries.
 
 ### Richer transaction evidence
 
-- [ ] optional `prestateTracer` diff-mode state-change extraction;
-- [ ] verified event-ABI decoding for indexed and non-indexed values beyond transfer standards;
-- [ ] token symbol, decimals, and collection metadata pinned to the investigation block;
+- [x] optional bounded `prestateTracer` diff-mode account and storage-change extraction;
+- [x] verified event-ABI decoding for indexed and non-indexed values beyond transfer standards;
+- [x] token symbol and decimals pinned to the investigation block;
+- [ ] ERC-721/1155 collection metadata pinned to the investigation block;
 - [ ] custom-error and revert-data decoding from verified interfaces;
 - [ ] mapping between trace-emitted logs and their internal call frames when the provider supports
   log-aware tracing;

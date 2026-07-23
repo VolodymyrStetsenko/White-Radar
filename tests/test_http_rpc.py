@@ -158,6 +158,27 @@ class RpcResponseTests(unittest.TestCase):
         self.assertEqual(hex_to_int("0xff"), 255)
         self.assertEqual(int_to_hex(255), "0xff")
 
+    def test_state_diff_trace_uses_prestate_tracer_diff_mode(self) -> None:
+        rpc = JsonRpcClient("https://example.invalid")
+        payload = {"pre": {}, "post": {}}
+        with patch.object(rpc, "call", return_value=payload) as call:
+            self.assertEqual(rpc.trace_transaction_state_diff("0xabc"), payload)
+        call.assert_called_once_with(
+            "debug_traceTransaction",
+            [
+                "0xabc",
+                {
+                    "tracer": "prestateTracer",
+                    "timeout": "10s",
+                    "tracerConfig": {
+                        "diffMode": True,
+                        "disableCode": False,
+                        "disableStorage": False,
+                    },
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

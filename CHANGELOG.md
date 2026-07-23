@@ -4,6 +4,40 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- renamed the investigation product surface to `WhiteRadar Incident` while preserving the
+  `white-radar` CLI for compatibility;
+- classified call frames, transfer evidence, graph edges, and CSV exports as committed,
+  attempted/reverted, or unknown so reverted native value is never reported as final fund flow;
+- added `core_path.csv` and a compact direct-evidence report section ahead of the complete bounded
+  candidate graph;
+- added high-fanout hub detection, bounded hub candidate retention, non-saturating linkage scores,
+  and explicit hub-suppression coverage counters;
+- preserved source provenance for suppressed hub records and continued candidate reconstruction
+  after individual RPC failures until the configured transaction budget is filled;
+- added tool-version provenance to canonical reconstruction records and integrity manifests;
+- added regression tests for top-level reverts, caught failed-call subtrees, and hub fan-out;
+- added bounded Geth `prestateTracer` diff-mode account, balance, nonce, code, and storage-change
+  evidence with provider degradation and explicit truncation records;
+- added verified-ABI receipt-event decoding, including indexed dynamic-value hashes and bounded
+  non-indexed string/bytes decoding without invented signatures;
+- added `events.csv`, `state_changes.csv`, and `storage_changes.csv` to single-transaction and
+  cross-transaction evidence bundles, reports, manifests, contexts, and timelines;
+- added `--no-state-diff` for providers that do not support the tracer;
+- expanded `white-radar investigate` from a one-transaction bundle into bounded backward/forward
+  reconstruction from any confirmed seed transaction;
+- added indexed Etherscan V2 normal, internal, ERC-20, ERC-721, and ERC-1155 history adapters with
+  portable bounded JSON-RPC block/log fallback;
+- added deterministic candidate ranking, multi-hop frontier expansion, cycle deduplication,
+  discovery reasons, coverage counters, and source-specific warnings;
+- added cross-transaction phases, chronology, entity aggregation, call/asset edges, and per-asset
+  ledgers;
+- added block-pinned token name, symbol, decimals, raw amounts, and exact display amounts;
+- added explicitly unverified built-in selector hints when verified ABI evidence is unavailable;
+- added per-call bounded calldata, decoded arguments, original byte length, SHA-256, truncation
+  state, and historical runtime-code fingerprints for contract entities;
+- added `transactions.csv`, cross-transaction JSON schema, richer Markdown reporting, searchable
+  interactive address/transaction graphs, and GraphML provenance;
+- added Monad mainnet configuration templates;
 - repositioned White Radar around transaction-centric incident investigation and a quiet protocol
   guard;
 - added `white-radar investigate` for confirmed transactions without a watchlist requirement;

@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
 MAX_ABI_BYTES = 2_000_000
 MAX_ABI_ENTRIES = 2_000
+MAX_EVENT_ARGUMENTS = 64
+MAX_DYNAMIC_EVENT_BYTES = 4_096
+BUILTIN_SELECTOR_SOURCE = "built-in selector hint (unverified)"
 ROTATION_OFFSETS = (
     (0, 36, 3, 41, 18),
     (1, 44, 10, 45, 2),
@@ -125,6 +128,19 @@ def function_signature(item: dict[str, Any]) -> str | None:
     return f"{item['name']}({','.join(canonical_abi_type(value) for value in inputs)})"
 
 
+def event_signature(item: dict[str, Any]) -> str | None:
+    if item.get("type") != "event" or not item.get("name") or item.get("anonymous"):
+        return None
+    inputs = item.get("inputs") or []
+    if not isinstance(inputs, list):
+        return None
+    return f"{item['name']}({','.join(canonical_abi_type(value) for value in inputs)})"
+
+
+def topic_for_event_signature(signature: str) -> str:
+    return "0x" + keccak_256(signature.encode("utf-8")).hex()
+
+
 def selector_for_signature(signature: str) -> str:
     return "0x" + keccak_256(signature.encode("utf-8"))[:4].hex()
 
@@ -139,6 +155,59 @@ def build_selector_catalog(abi: list[dict[str, Any]]) -> dict[str, str]:
         selector: " | ".join(sorted(signatures))
         for selector, signatures in sorted(collisions.items())
     }
+
+
+def _function(name: str, *inputs: tuple[str, str]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": name,
+        "inputs": [{"name": input_name, "type": type_name} for input_name, type_name in inputs],
+    }
+
+
+BUILTIN_FUNCTIONS = (
+    _function("transfer", ("to", "address"), ("amount", "uint256")),
+    _function("approve", ("spender", "address"), ("amount", "uint256")),
+    _function(
+        "transferFrom",
+        ("from", "address"),
+        ("to", "address"),
+        ("valueOrTokenId", "uint256"),
+    ),
+    _function("balanceOf", ("account", "address")),
+    _function("allowance", ("owner", "address"), ("spender", "address")),
+    _function("totalSupply"),
+    _function("mint", ("to", "address"), ("amount", "uint256")),
+    _function("burn", ("amount", "uint256")),
+    _function("burnFrom", ("account", "address"), ("amount", "uint256")),
+    _function(
+        "safeTransferFrom",
+        ("from", "address"),
+        ("to", "address"),
+        ("tokenId", "uint256"),
+    ),
+    _function("setApprovalForAll", ("operator", "address"), ("approved", "bool")),
+    _function(
+        "safeTransferFrom",
+        ("from", "address"),
+        ("to", "address"),
+        ("id", "uint256"),
+        ("amount", "uint256"),
+        ("data", "bytes"),
+    ),
+    _function("upgradeTo", ("newImplementation", "address")),
+    _function("upgradeToAndCall", ("newImplementation", "address"), ("data", "bytes")),
+    _function("implementation"),
+    _function("owner"),
+    _function("grantRole", ("role", "bytes32"), ("account", "address")),
+    _function("revokeRole", ("role", "bytes32"), ("account", "address")),
+)
+BUILTIN_SELECTORS = build_selector_catalog(list(BUILTIN_FUNCTIONS))
+BUILTIN_ITEMS = {
+    selector_for_signature(signature): item
+    for item in BUILTIN_FUNCTIONS
+    if (signature := function_signature(item)) is not None
+}
 
 
 def _decode_word(type_name: str, word: bytes) -> object:
@@ -191,6 +260,86 @@ class DecodedCall:
     arguments: dict[str, object]
     source: str | None
     abi_sha256: str | None
+    confidence: str | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class DecodedEvent:
+    topic0: str
+    signature: str
+    name: str
+    arguments: dict[str, object]
+    source: str
+    abi_sha256: str
+    confidence: str = "verified"
+
+
+def _dynamic_event_type(type_name: str) -> bool:
+    return type_name in {"string", "bytes"} or "[" in type_name or type_name.startswith("(")
+
+
+def _decode_dynamic_event_value(type_name: str, raw: bytes, head_offset: int) -> object:
+    if head_offset + 32 > len(raw):
+        return "<unavailable>"
+    offset = int.from_bytes(raw[head_offset : head_offset + 32], "big")
+    if offset % 32 or offset + 32 > len(raw):
+        return "<invalid-offset>"
+    if type_name not in {"string", "bytes"}:
+        return f"<dynamic:{type_name}>"
+    length = int.from_bytes(raw[offset : offset + 32], "big")
+    start = offset + 32
+    available = max(0, len(raw) - start)
+    selected_length = min(length, available, MAX_DYNAMIC_EVENT_BYTES)
+    value = raw[start : start + selected_length]
+    suffix = "<truncated>" if selected_length < length else ""
+    if type_name == "string":
+        return value.decode("utf-8", errors="replace") + suffix
+    return "0x" + value.hex() + suffix
+
+
+def decode_event_arguments(
+    abi_item: dict[str, Any], topics: list[str], data: str
+) -> dict[str, object]:
+    inputs = abi_item.get("inputs") or []
+    if not isinstance(inputs, list):
+        return {}
+    try:
+        raw = bytes.fromhex(data.removeprefix("0x"))
+    except ValueError:
+        raw = b""
+    decoded: dict[str, object] = {}
+    topic_index = 1
+    data_index = 0
+    for index, parameter in enumerate(inputs[:MAX_EVENT_ARGUMENTS]):
+        if not isinstance(parameter, dict):
+            continue
+        name = str(parameter.get("name") or f"arg{index}")
+        type_name = canonical_abi_type(parameter)
+        if parameter.get("indexed"):
+            if topic_index >= len(topics):
+                decoded[name] = "<missing-topic>"
+            elif _dynamic_event_type(type_name):
+                decoded[name] = {"indexed_hash": topics[topic_index].lower()}
+            else:
+                try:
+                    word = bytes.fromhex(topics[topic_index].removeprefix("0x"))
+                except ValueError:
+                    decoded[name] = "<invalid-topic>"
+                else:
+                    decoded[name] = (
+                        _decode_word(type_name, word) if len(word) == 32 else "<invalid-topic>"
+                    )
+            topic_index += 1
+            continue
+        head_offset = data_index * 32
+        if _dynamic_event_type(type_name):
+            decoded[name] = _decode_dynamic_event_value(type_name, raw, head_offset)
+        elif head_offset + 32 <= len(raw):
+            decoded[name] = _decode_word(type_name, raw[head_offset : head_offset + 32])
+        else:
+            decoded[name] = "<missing-data>"
+        data_index += 1
+    return decoded
 
 
 class AbiResolver:
@@ -234,6 +383,32 @@ class AbiResolver:
             return None
         return [item for item in parsed if isinstance(item, dict)]
 
+    def _load_verified_abi(
+        self, chain_id: int, address: str, *, refresh: bool = False
+    ) -> tuple[list[dict[str, Any]], str, str] | None:
+        identity = (chain_id, address.lower())
+        if not refresh and identity in self._memory:
+            return self._memory[identity]
+        if not refresh and identity in self._unavailable:
+            return None
+        abi = self._fetch_etherscan(chain_id, address)
+        if abi is None:
+            self._unavailable.add(identity)
+            return None
+        canonical = json.dumps(abi, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        result = (abi, "Etherscan", digest)
+        self._memory[identity] = result
+        self._unavailable.discard(identity)
+        self._store.upsert_abi_catalog(
+            chain_id=chain_id,
+            address=address,
+            source="Etherscan",
+            abi_sha256=digest,
+            selectors=build_selector_catalog(abi),
+        )
+        return result
+
     def catalog(
         self, chain_id: int, address: str, *, refresh: bool = False
     ) -> tuple[dict[str, str], str | None, str | None]:
@@ -244,22 +419,12 @@ class AbiResolver:
                 return cached["selectors"], str(cached["source"]), str(cached["abi_sha256"])
             if identity in self._unavailable:
                 return {}, None, None
-        abi = self._fetch_etherscan(chain_id, address)
-        if abi is None:
-            self._unavailable.add(identity)
+        loaded = self._load_verified_abi(chain_id, address, refresh=refresh)
+        if loaded is None:
             return {}, None, None
-        canonical = json.dumps(abi, sort_keys=True, separators=(",", ":"))
-        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        abi, source, digest = loaded
         selectors = build_selector_catalog(abi)
-        self._memory[identity] = (abi, "Etherscan", digest)
-        self._store.upsert_abi_catalog(
-            chain_id=chain_id,
-            address=address,
-            source="Etherscan",
-            abi_sha256=digest,
-            selectors=selectors,
-        )
-        return selectors, "Etherscan", digest
+        return selectors, source, digest
 
     def resolve(
         self,
@@ -271,7 +436,9 @@ class AbiResolver:
     ) -> DecodedCall:
         selector = calldata[:10].lower() if len(calldata) >= 10 else "0x"
         selectors, source, digest = self.catalog(chain_id, address)
-        signature = selectors.get(selector) or fallback_signature
+        verified_signature = selectors.get(selector)
+        builtin_signature = BUILTIN_SELECTORS.get(selector)
+        signature = verified_signature or fallback_signature or builtin_signature
         arguments: dict[str, object] = {}
         in_memory = self._memory.get((chain_id, address.lower()))
         if signature and in_memory and " | " not in signature:
@@ -281,4 +448,54 @@ class AbiResolver:
             )
             if item:
                 arguments = decode_static_arguments(item, calldata)
-        return DecodedCall(selector, signature, arguments, source, digest)
+        if not arguments and builtin_signature and signature == builtin_signature:
+            item = BUILTIN_ITEMS.get(selector)
+            if item:
+                arguments = decode_static_arguments(item, calldata)
+        if verified_signature:
+            confidence = "verified"
+        elif fallback_signature:
+            confidence = "provided_hint"
+        elif builtin_signature:
+            confidence = "candidate"
+            source = BUILTIN_SELECTOR_SOURCE
+        else:
+            confidence = None
+        return DecodedCall(selector, signature, arguments, source, digest, confidence)
+
+    def resolve_event(
+        self,
+        chain_id: int,
+        address: str,
+        topics: list[str],
+        data: str,
+    ) -> DecodedEvent | None:
+        if not topics:
+            return None
+        topic0 = topics[0].lower()
+        loaded = self._load_verified_abi(chain_id, address)
+        if loaded is None:
+            return None
+        abi, source, digest = loaded
+        item = next(
+            (
+                entry
+                for entry in abi[:MAX_ABI_ENTRIES]
+                if (signature := event_signature(entry))
+                and topic_for_event_signature(signature) == topic0
+            ),
+            None,
+        )
+        if item is None:
+            return None
+        signature = event_signature(item)
+        if signature is None:
+            return None
+        return DecodedEvent(
+            topic0=topic0,
+            signature=signature,
+            name=str(item["name"]),
+            arguments=decode_event_arguments(item, topics, data),
+            source=source,
+            abi_sha256=digest,
+        )
