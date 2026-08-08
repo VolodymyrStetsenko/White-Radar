@@ -4,6 +4,8 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.3.1 — 2026-08-08
+
 - renamed the investigation product surface to `WhiteRadar Incident` while preserving the
   `white-radar` CLI for compatibility;
 - classified call frames, transfer evidence, graph edges, and CSV exports as committed,
