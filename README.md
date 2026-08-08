@@ -1,10 +1,16 @@
 # WhiteRadar Incident
 
+[![CI](https://github.com/VolodymyrStetsenko/White-Radar/actions/workflows/ci.yml/badge.svg)](https://github.com/VolodymyrStetsenko/White-Radar/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.3.1-111111)](CHANGELOG.md)
+[![License](https://img.shields.io/badge/license-all%20rights%20reserved-111111)](LICENSE)
+
 WhiteRadar Incident is a transaction-centric incident reconstruction engine for EVM networks. Given one
 confirmed seed transaction from any observed point in a suspected incident, it searches a bounded
 window before and after that seed, reconstructs related transactions, and combines execution,
 asset movement, contract relationships, proxy context, and evidence provenance into one portable
 case bundle.
+
+Within [Volodymyr Stetsenko's security practice](https://volodymyrstetsenko.github.io/VolodymyrStetsenko/), White Radar is research infrastructure for bounded incident reconstruction. It is not presented as a universal attack detector, a managed monitoring service, or an attribution system.
 
 The primary product is investigation, not universal attack prediction. A secondary quiet guard can
 observe explicitly inventoried protocol contracts, but routine mempool activity is aggregated as
